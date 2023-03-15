@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 auto_ops = "0.3.0"
+gc = { version = "0.4.1", features = ["derive"] }
 
 [build-dependencies]
 bindgen = "0.63.0"

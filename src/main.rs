@@ -3,19 +3,37 @@
 #![feature(once_cell)]
 #![feature(thread_local)]
 #![feature(new_uninit)]
+#![feature(arbitrary_self_types)]
+#![allow(non_upper_case_globals)]
 
-use core::panic;
-use std::rc::Rc;
 use calcium::Number;
+use core::panic;
+use gc::{unsafe_empty_trace, Finalize, Gc, Trace};
+
+macro_rules! simple_empty_finalize_trace {
+    ($($T:ty),*) => {
+        $(
+            impl Finalize for $T {}
+            unsafe impl Trace for $T { unsafe_empty_trace!(); }
+        )*
+    }
+}
 
 pub mod calcium {
-    use std::fmt::{Display, Debug};
-    
-    use std::cell::LazyCell;
-    use std::ffi::{CStr, c_void, c_long, c_ulong, CString};
-    use auto_ops::impl_op_ex;
+    use std::fmt::{Debug, Display};
 
-    use burrito::{ca_ctx_struct, ca_ctx_init, ca_struct, ca_get_str, flint_free, ca_zero, ca_one, ca_pi, ca_clear, ca_ctx_clear, flint_cleanup, ca_add, ca_sub, ca_init, ca_set_si, ca_set_ui, ca_mul, ca_div, ca_set_d, ca_check_equal, truth_t_T_TRUE, truth_t_T_FALSE, fmpq, fmpq_init, fmpq_set_str, ca_set_fmpq, fmpq_clear, ca_get_fmpz, fmpz, fmpz_init, fmpz_clear, fmpz_get_ui, fmpz_sgn, fmpz_abs_fits_ui};
+    use auto_ops::impl_op_ex;
+    use std::cell::LazyCell;
+    use std::ffi::{c_long, c_ulong, c_void, CStr, CString};
+
+    use burrito::{
+        ca_add, ca_check_equal, ca_clear, ca_ctx_clear, ca_ctx_init, ca_ctx_struct, ca_div,
+        ca_get_fmpz, ca_get_str, ca_init, ca_mul, ca_one, ca_pi, ca_set_d, ca_set_fmpq, ca_set_si,
+        ca_set_ui, ca_struct, ca_sub, ca_zero, flint_cleanup, flint_free, fmpq, fmpq_clear,
+        fmpq_init, fmpq_set_str, fmpz, fmpz_abs_fits_ui, fmpz_clear, fmpz_get_ui, fmpz_init,
+        fmpz_sgn, truth_t_T_FALSE, truth_t_T_TRUE,
+    };
+    use gc::{unsafe_empty_trace, Finalize, Trace};
 
     pub struct Context {
         ctx: *mut ca_ctx_struct,
@@ -31,53 +49,71 @@ pub mod calcium {
     }
 
     #[thread_local]
-    pub static mut CALCIUM_CTX : LazyCell<Context> = LazyCell::new(||  unsafe {
+    pub static mut CALCIUM_CTX: LazyCell<Context> = LazyCell::new(|| unsafe {
         let mut ctx = Box::<ca_ctx_struct>::new_uninit();
         ca_ctx_init(ctx.as_mut_ptr());
-        Context { ctx: Box::into_raw(ctx.assume_init()) }
+        Context {
+            ctx: Box::into_raw(ctx.assume_init()),
+        }
     });
 
     pub struct Number {
         data: *mut ca_struct,
     }
-    
+
+    simple_empty_finalize_trace![Number];
+
     // TODO: mutable update like +=?
     impl Number {
         pub fn new() -> Number {
             unsafe {
                 let mut x = Box::<ca_struct>::new_uninit();
                 ca_init(x.as_mut_ptr(), CALCIUM_CTX.ctx);
-                Number { data: Box::into_raw(x.assume_init()) }   
+                Number {
+                    data: Box::into_raw(x.assume_init()),
+                }
             }
         }
         pub fn zero() -> Number {
             let x = Number::new();
-            unsafe { ca_zero(x.data, CALCIUM_CTX.ctx); }
+            unsafe {
+                ca_zero(x.data, CALCIUM_CTX.ctx);
+            }
             x
         }
         pub fn one() -> Number {
             let x = Number::new();
-            unsafe { ca_one(x.data, CALCIUM_CTX.ctx); }
+            unsafe {
+                ca_one(x.data, CALCIUM_CTX.ctx);
+            }
             x
         }
         pub fn pi() -> Number {
             let x = Number::new();
-            unsafe { ca_pi(x.data, CALCIUM_CTX.ctx); }
+            unsafe {
+                ca_pi(x.data, CALCIUM_CTX.ctx);
+            }
             x
         }
         pub fn from_clong(i: c_long) -> Number {
             let x = Number::new();
-            unsafe { ca_set_si(x.data, i, CALCIUM_CTX.ctx); }
+            unsafe {
+                ca_set_si(x.data, i, CALCIUM_CTX.ctx);
+            }
             x
         }
         pub fn from_ulong(u: c_ulong) -> Number {
             let x = Number::new();
-            unsafe { ca_set_ui(x.data, u, CALCIUM_CTX.ctx); }
+            unsafe {
+                ca_set_ui(x.data, u, CALCIUM_CTX.ctx);
+            }
             x
         }
         pub fn from_f64(f: f64) -> Number {
             let x = Number::new();
-            unsafe { ca_set_d(x.data, f, CALCIUM_CTX.ctx); }
+            unsafe {
+                ca_set_d(x.data, f, CALCIUM_CTX.ctx);
+            }
             x
         }
         pub fn from_str(s: &str) -> Option<Number> {
@@ -104,14 +140,18 @@ pub mod calcium {
         unsafe { ca_add(res.data, a.data, b.data, CALCIUM_CTX.ctx); }
         res
     });
-    impl_op_ex!(- |a: &Number, b: &Number| -> Number {
+    impl_op_ex!(-|a: &Number, b: &Number| -> Number {
         let res = Number::new();
-        unsafe { ca_sub(res.data, a.data, b.data, CALCIUM_CTX.ctx); }
+        unsafe {
+            ca_sub(res.data, a.data, b.data, CALCIUM_CTX.ctx);
+        }
         res
     });
-    impl_op_ex!(* |a: &Number, b: &Number| -> Number {
+    impl_op_ex!(*|a: &Number, b: &Number| -> Number {
         let res = Number::new();
-        unsafe { ca_mul(res.data, a.data, b.data, CALCIUM_CTX.ctx); }
+        unsafe {
+            ca_mul(res.data, a.data, b.data, CALCIUM_CTX.ctx);
+        }
         res
     });
     impl_op_ex!(/ |a: &Number, b: &Number| -> Number {
@@ -120,7 +160,9 @@ pub mod calcium {
         res
     });
     impl Into<usize> for Number {
-        fn into(self) -> usize { (&self).into() }
+        fn into(self) -> usize {
+            (&self).into()
+        }
     }
     impl Into<usize> for &Number {
         fn into(self) -> usize {
@@ -158,9 +200,9 @@ pub mod calcium {
             unsafe {
                 let truth = ca_check_equal(self.data, other.data, CALCIUM_CTX.ctx);
                 match truth {
-                truth_t_T_TRUE => true,
-                truth_t_T_FALSE => false,
-                _ => panic!("incomparable"),
+                    truth_t_T_TRUE => true,
+                    truth_t_T_FALSE => false,
+                    _ => panic!("incomparable"),
                 }
             }
         }
@@ -182,53 +224,53 @@ pub mod calcium {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Trace, Finalize)]
 enum Expression {
     Number(calcium::Number),
     Bool(bool),
     String(String),
-    BinOp(Rc<Expression>, BinOp, Rc<Expression>),
+    BinOp(Gc<Expression>, BinOp, Gc<Expression>),
     Ident(String),
-    Let(Rc<Expression>, Rc<Expression>, Rc<Expression>),
-    If(Rc<Expression>, Rc<Expression>, Rc<Expression>),
-    Tuple(Vec<(Option<Rc<Expression>>, Rc<Expression>)>),
-    List(Vec<Rc<Expression>>),
-    Selector(Rc<Expression>, Rc<Expression>),
-    Index(Rc<Expression>, Rc<Expression>),
+    Let(Gc<Expression>, Gc<Expression>, Gc<Expression>),
+    If(Gc<Expression>, Gc<Expression>, Gc<Expression>),
+    Tuple(Vec<(Option<Gc<Expression>>, Gc<Expression>)>),
+    List(Vec<Gc<Expression>>),
+    Selector(Gc<Expression>, Gc<Expression>),
+    Index(Gc<Expression>, Gc<Expression>),
 }
 
 impl Expression {
-    fn new_number(n: Number) -> Rc<Expression> {
+    fn new_number(n: Number) -> Gc<Expression> {
         Expression::Number(n).into()
     }
-    fn new_bool(b: bool) -> Rc<Expression> {
+    fn new_bool(b: bool) -> Gc<Expression> {
         Expression::Bool(b).into()
     }
-    fn new_string(s: &str) -> Rc<Expression> {
+    fn new_string(s: &str) -> Gc<Expression> {
         Expression::String(String::from(s)).into()
     }
-    fn new_binop(l: Rc<Expression>, op: BinOp, r: Rc<Expression>) -> Rc<Expression> {
+    fn new_binop(l: Gc<Expression>, op: BinOp, r: Gc<Expression>) -> Gc<Expression> {
         Expression::BinOp(l, op, r).into()
     }
-    fn new_ident(s: &str) -> Rc<Expression> {
+    fn new_ident(s: &str) -> Gc<Expression> {
         Expression::Ident(String::from(s)).into()
     }
-    fn new_let(name: Rc<Expression>, v: Rc<Expression>, x: Rc<Expression>) -> Rc<Expression> {
+    fn new_let(name: Gc<Expression>, v: Gc<Expression>, x: Gc<Expression>) -> Gc<Expression> {
         Expression::Let(name, v, x).into()
     }
-    fn new_if(cond: Rc<Expression>, then: Rc<Expression>, els: Rc<Expression>) -> Rc<Expression> {
+    fn new_if(cond: Gc<Expression>, then: Gc<Expression>, els: Gc<Expression>) -> Gc<Expression> {
         Expression::If(cond, then, els).into()
     }
-    fn new_tuple(v: Vec<(Option<Rc<Expression>>, Rc<Expression>)>) -> Rc<Expression> {
+    fn new_tuple(v: Vec<(Option<Gc<Expression>>, Gc<Expression>)>) -> Gc<Expression> {
         Expression::Tuple(v).into()
     }
-    fn new_list(v: Vec<Rc<Expression>>) -> Rc<Expression> {
+    fn new_list(v: Vec<Gc<Expression>>) -> Gc<Expression> {
         Expression::List(v).into()
     }
-    fn new_selector(x: Rc<Expression>, field: Rc<Expression>) -> Rc<Expression> {
+    fn new_selector(x: Gc<Expression>, field: Gc<Expression>) -> Gc<Expression> {
         Expression::Selector(x, field).into()
     }
-    fn new_index(x: Rc<Expression>, i: Rc<Expression>) -> Rc<Expression> {
+    fn new_index(x: Gc<Expression>, i: Gc<Expression>) -> Gc<Expression> {
         Expression::Index(x, i).into()
     }
 }
@@ -242,17 +284,19 @@ enum BinOp {
     // Assign,
 }
 
+simple_empty_finalize_trace![BinOp];
+
 // struct Interpreter {
 //     context: HashMap<String, >
 // }
 
 // struct Environment {
-//     context: HashMap<String, Option<Rc<Expression>>>,
-//     parent: Option<Rc<Environment>>,
+//     context: HashMap<String, Option<Gc<Expression>>>,
+//     parent: Option<Gc<Environment>>,
 // }
 
 // impl Environment {
-//     fn lookup(&self, name: &String) -> Rc<Expression> {
+//     fn lookup(&self, name: &String) -> Gc<Expression> {
 //         match &self.context[name] {
 //             Some(v) => v.clone(),
 //             None => match &self.parent {
@@ -261,7 +305,7 @@ enum BinOp {
 //             },
 //         }
 //     }
-//     fn insert(&mut self, name: String, x: Rc<Expression>) {
+//     fn insert(&mut self, name: String, x: Gc<Expression>) {
 //         self.context.insert(name, Some(x));
 //         // self.context[name] = Some(x);
 //     }
@@ -269,18 +313,19 @@ enum BinOp {
 
 // struct ContextEntry {
 //     name: String,
-//     x: Rc<Expression>,
+//     x: Gc<Expression>,
 // }
 
+#[derive(Trace, Finalize)]
 struct Context {
     // stored at front (prepended)
-    parent: Option<Rc<Context>>,
+    parent: Option<Gc<Context>>,
     name: String,
-    x: Rc<Expression>,
+    x: Gc<Expression>,
 }
 
 impl Context {
-    fn lookup(self: Rc<Context>, name: &String) -> Rc<Expression> {
+    fn lookup(self: Gc<Context>, name: &String) -> Gc<Expression> {
         if &self.name == name {
             self.x.clone()
         } else if let Some(p) = self.parent.clone() {
@@ -289,15 +334,20 @@ impl Context {
             panic!("couldn't find identifier")
         }
     }
-    fn with(self: Rc<Context>, name: String, x: &Rc<Expression>) -> Rc<Context> {
+    fn with(self: Gc<Context>, name: String, x: &Gc<Expression>) -> Gc<Context> {
         Context::new(Some(self), name, x)
     }
-    fn new(parent: Option<Rc<Context>>, name: String, x: &Rc<Expression>) -> Rc<Context> {
-        Context{parent: parent, name: name, x: x.clone()}.into()
+    fn new(parent: Option<Gc<Context>>, name: String, x: &Gc<Expression>) -> Gc<Context> {
+        Context {
+            parent: parent,
+            name: name,
+            x: x.clone(),
+        }
+        .into()
     }
 }
 
-fn eval(ctx: &Option<Rc<Context>>, x: &Rc<Expression>) -> Rc<Expression> {
+fn eval(ctx: &Option<Gc<Context>>, x: &Gc<Expression>) -> Gc<Expression> {
     let (ctx, x) = (ctx.clone(), x.clone());
     match &*x {
         Expression::Number(_) => x,
@@ -342,7 +392,7 @@ fn eval(ctx: &Option<Rc<Context>>, x: &Rc<Expression>) -> Rc<Expression> {
 }
 
 fn main() {
-    // let prog : Rc<_> = Expression::Let(
+    // let prog : Gc<_> = Expression::Let(
     //     Expression::Ident(String::from("x").into()).into(),
     //     Expression::Number(3).into(),
     //     Expression::BinOp(
@@ -374,7 +424,7 @@ fn main() {
     //     )]),
     //     Expression::new_number(0),
     // );
-    // let prog : Rc<_> = Expression::If(
+    // let prog : Gc<_> = Expression::If(
     //     Expression::Bool(false).into(),
     //     Expression::Number(3).into(),
     //     Expression::BinOp(
@@ -383,7 +433,7 @@ fn main() {
     //         Expression::Number(1).into(),
     //     ).into(),
     // ).into();
-    // let prog : Rc<_> = Expression::Tuple(
+    // let prog : Gc<_> = Expression::Tuple(
     //     vec![
     //         (None, Expression::Number(1).into()),
     //         (Some(Expression::Ident(String::from("x").into()).into()),
@@ -395,7 +445,7 @@ fn main() {
     //     ],
     // ).into();
     let ctx = None;
-    // let env: Rc<_> = Environment{
+    // let env: Gc<_> = Environment{
     //     context: HashMap::new(),
     //     parent: None,
     // }.into();
@@ -433,24 +483,24 @@ fn main() {
     // let y : usize = Number::from_ulong(1).into();
     // println!("y={}", y);
     // unsafe {
-        // let mut ctx = MaybeUninit::<ca_ctx_struct>::uninit();
-        // ca_ctx_init(ctx.as_mut_ptr());
-        // let ctx = &mut ctx.assume_init() as *mut ca_ctx_struct;
+    // let mut ctx = MaybeUninit::<ca_ctx_struct>::uninit();
+    // ca_ctx_init(ctx.as_mut_ptr());
+    // let ctx = &mut ctx.assume_init() as *mut ca_ctx_struct;
 
-        // let mut ca = MaybeUninit::<ca_struct>::uninit();
-        // ca_init(ca.as_mut_ptr(), ctx);
-        // ca_one(ca.as_mut_ptr(), ctx);
-        // let ca = &mut ca.assume_init() as *mut ca_struct;
-        // let pctx = ctx.as_mut_ptr();
-        // let mut x: MaybeUninit<ca_struct> = MaybeUninit::uninit();
-        // let px = x.as_mut_ptr();
-        // ca_ctx_init(pctx);
-        // ctx.assume_init();
-        // let mut c = ctx.assume_init();
-        // let p: *mut ca_ctx_struct = &mut c as *mut ca_ctx_struct;
-        // let px : *mut ca_struct = x.as_mut_ptr();
-        // ca_one(px, pctx);
-        // x.assume_init();
-        // let one = &mut x.assume_init();
-    // }  
+    // let mut ca = MaybeUninit::<ca_struct>::uninit();
+    // ca_init(ca.as_mut_ptr(), ctx);
+    // ca_one(ca.as_mut_ptr(), ctx);
+    // let ca = &mut ca.assume_init() as *mut ca_struct;
+    // let pctx = ctx.as_mut_ptr();
+    // let mut x: MaybeUninit<ca_struct> = MaybeUninit::uninit();
+    // let px = x.as_mut_ptr();
+    // ca_ctx_init(pctx);
+    // ctx.assume_init();
+    // let mut c = ctx.assume_init();
+    // let p: *mut ca_ctx_struct = &mut c as *mut ca_ctx_struct;
+    // let px : *mut ca_struct = x.as_mut_ptr();
+    // ca_one(px, pctx);
+    // x.assume_init();
+    // let one = &mut x.assume_init();
+    // }
 }
