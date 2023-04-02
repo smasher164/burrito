@@ -237,9 +237,24 @@ enum Expression {
     List(Vec<Gc<Expression>>),
     Selector(Gc<Expression>, Gc<Expression>),
     Index(Gc<Expression>, Gc<Expression>),
+    Ascribe(Gc<Expression>, Gc<Type>),
+    Abs(Gc<Expression>, Gc<Type>, Gc<Expression>), // add ident for parameter so that it always looks it up in the context? is the param type necessary?
+    App(Gc<Expression>, Gc<Expression>), // Reuse for constructors?
+    Fix(Gc<Expression>),
+    Case(Gc<Expression>, Vec<(String, String, Gc<Expression>)>), // Compile exhaustive patterns to this, since all we need is an eliminator.
+    // TODO: Effects
+}
+
+#[derive(Debug, Trace, Finalize)]
+enum Type {
+    // TODO
+    // tuples, lists, string, bool, number, abs, variant, id
 }
 
 impl Expression {
+    fn is_val(&self) -> bool {
+        todo!()
+    }
     fn new_number(n: Number) -> Gc<Expression> {
         Expression::Number(n).into()
     }
@@ -387,6 +402,35 @@ fn eval(ctx: &Option<Gc<Context>>, x: &Gc<Expression>) -> Gc<Expression> {
             Expression::List(l) => l[Into::<usize>::into(i)].clone(),
             _ => panic!("expression is not indexable"),
         }
+        Expression::Abs(_, _, _) => x,
+        Expression::App(f, arg) => match &*eval(&ctx, f) {
+            Expression::Abs(param, _param_ty, body) => {
+                let arg = eval(&ctx, arg);
+                if !arg.is_val() {
+                    todo!()
+                }
+                if let Expression::Ident(id) = &**param {
+                    match ctx.clone() {
+                        Some(ctx) => eval(&Some(ctx.with(id.to_string(), &arg)), body),
+                        None => eval(&Some(Context::new(None, id.to_string(), &arg)), body),
+                    }
+                } else {
+                    todo!()
+                }
+            },
+            _ => todo!(),
+            // TODO: handle constructor. is it an ident we look up in some scope?
+        },
+        Expression::Fix(x)  if let Expression::Abs(param, _, body) = &*eval(&ctx, x) =>
+        if let Expression::Ident(id) = &**param {
+            match ctx.clone() {
+                Some(ctx) => eval(&Some(ctx.with(id.to_string(), body)), body),
+                None => eval(&Some(Context::new(None, id.to_string(), body)), body),
+            }
+        } else {
+            todo!()
+        },
+        Expression::Ascribe(x, _) => x.clone(),
         _ => panic!("unexpected expression"),
     }
 }
