@@ -8,6 +8,8 @@ edition = "2021"
 [dependencies]
 auto_ops = "0.3.0"
 gc = { version = "0.4.1", features = ["derive"] }
+qcell = { version = "0.5.3", features = ["generativity"] }
+generativity = "1.0.1"
 
 [build-dependencies]
 bindgen = "0.63.0"

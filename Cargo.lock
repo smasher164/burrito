@@ -43,6 +43,8 @@ dependencies = [
  "auto_ops",
  "bindgen",
  "gc",
+ "generativity",
+ "qcell",
 ]
 
 [[package]]
@@ -97,6 +99,12 @@ dependencies = [
  "syn",
  "synstructure",
 ]
+
+[[package]]
+name = "generativity"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5589a5c7c30674a175be65b67baec4b6af25cfa4e96c1ff1d630ab43d67ac5ae"
 
 [[package]]
 name = "glob"
@@ -182,6 +190,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57a8eca9f9c4ffde41714334dee777596264c7825420f521abc92b5b5deb63a5"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "qcell"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76babcf954d92eee717a7c9bfc4921d91dfbf2124d9bfb6ed1b0b3d0c47361e3"
+dependencies = [
+ "generativity",
+ "once_cell",
 ]
 
 [[package]]
