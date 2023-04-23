@@ -6,7 +6,7 @@
 
 use calcium::Number;
 use core::panic;
-use std::{collections::{HashMap, HashSet}, hash::Hash, cell::{RefCell, Ref}};
+use std::{collections::{HashMap, HashSet}, hash::Hash, cell::{RefCell, Ref, RefMut}};
 use gc::{unsafe_empty_trace, Finalize, Gc, Trace, GcCell};
 
 macro_rules! simple_empty_finalize_trace {
@@ -86,7 +86,7 @@ impl Expression {
     fn new_index(x: Gc<Expression>, i: Gc<Expression>) -> Gc<Expression> {
         Expression::Index(x, i).into()
     }
-    fn new_abs(bind: Gc<Expression>, ty: Gc<Type>, body: Gc<Expression>) -> Gc<Expression> {
+    fn new_lam(bind: Gc<Expression>, ty: Gc<Type>, body: Gc<Expression>) -> Gc<Expression> {
         Expression::Lam(bind, ty, body).into()
     }
     fn new_app(fun: Gc<Expression>, arg: Gc<Expression>) -> Gc<Expression> {
@@ -224,17 +224,18 @@ fn lookup_id(stack: &Vec<Frame>, s: &str) -> Gc<Expression> {
     panic!("variable {s} was not in scope")
 }
 
-fn add_fresh_name<'a>(unique_names: &'a mut HashSet<String>, x: &str) -> &'a str {
+fn add_fresh_name(unique_names: &mut HashSet<String>, x: &str) -> String {
     let mut num = 1;
     let mut to_check = x.to_owned();
     while unique_names.contains(&to_check as &str) {
         to_check = format!("{x}{num}");
         num += 1;
     }
-    unique_names.get_or_insert(to_check)
+    unique_names.insert(to_check.clone());
+    to_check
 }
 
-fn resolve_names<'a>(m: &mut Vec<(&'a str, &'a str)>, free_vars: &mut Vec<(String, GcCell<Option<Gc<Expression>>>)>, unique_names: &'a mut HashSet<String>, dist: usize, prog: &'a Gc<Expression>) -> Gc<Expression> {
+fn resolve_names(m: &mut Vec<(String, String)>, free_vars: &mut Vec<(String, GcCell<Option<Gc<Expression>>>)>, unique_names: &mut HashSet<String>, dist: usize, prog: &Gc<Expression>) -> Gc<Expression> {
     match &**prog {
         Expression::BinOp(l, op, r) => {
             let l = resolve_names(m, free_vars, unique_names, dist, l);
@@ -245,11 +246,11 @@ fn resolve_names<'a>(m: &mut Vec<(&'a str, &'a str)>, free_vars: &mut Vec<(Strin
             let rhs = resolve_names(m, free_vars, unique_names, dist, rhs);
             let Expression::Ident(x) = &**bind else { panic!("expected identifier in let binding") };
             let fresh_name = add_fresh_name(unique_names, x);
-            m.push((x, fresh_name));
+            m.push((x.clone(), fresh_name.clone()));
             let body = resolve_names(m, free_vars, unique_names, dist+1, body);
             m.pop(); // pop here or inside?
-            unique_names.remove(fresh_name);
-            Expression::new_let(bind.clone(), rhs, body)
+            unique_names.remove(&fresh_name);
+            Expression::new_let(Expression::new_ident(&fresh_name), rhs, body)
         },
         Expression::If(cond, then, els) => {
             let cond = resolve_names(m, free_vars, unique_names, dist, cond);
@@ -267,13 +268,13 @@ fn resolve_names<'a>(m: &mut Vec<(&'a str, &'a str)>, free_vars: &mut Vec<(Strin
             // if not found, then it's a free variable
             // append to free_vars
             let mut i = 0;
-            let mut s: &str = x;
+            let mut s: String = x.to_string();
             let mut is_local = false;
             for var in m.iter().rev() {
-                if var.0 == x {
+                if &var.0 == x {
                     is_local = i <= dist;
                     // Look up the unique name for this binding and replace it with that.
-                    s = var.1;
+                    s = var.1.clone();
                     break;
                 }
                 i+=1;
@@ -281,17 +282,17 @@ fn resolve_names<'a>(m: &mut Vec<(&'a str, &'a str)>, free_vars: &mut Vec<(Strin
             if !is_local {
                 free_vars.push((s.to_string(), GcCell::new(None)));
             }
-            return Expression::new_ident(s);
+            return Expression::new_ident(&s);
         },
         Expression::Lam(bind, /*TODO: resolve names in types */ ty, body) => {
             let Expression::Ident(x) = &**bind else { panic!("expected identifier in lambda binding") };
             let fresh_name = add_fresh_name(unique_names, x);
-            m.push((x, fresh_name));
+            m.push((x.clone(), fresh_name.clone()));
             let mut free_vars = Vec::new();
             let body = resolve_names(m, &mut free_vars, unique_names, 0, body);
             m.pop();
-            unique_names.remove(fresh_name);
-            Expression::new_closure(free_vars, Expression::new_abs(bind.clone(), ty.clone(), body))
+            unique_names.remove(&fresh_name);
+            Expression::new_closure(free_vars, Expression::new_lam(Expression::new_ident(&fresh_name), ty.clone(), body))
         },
         Expression::App(fun, arg) => {
             let fun = resolve_names(m, free_vars, unique_names, dist, fun);
@@ -600,23 +601,35 @@ fn main() {
     //         _),
     //     Expression::new_number(Number::from_ulong(2)),
     // );
+    // let prog = Expression::new_let(
+    //     Expression::new_ident("x"),
+    //     Expression::new_let(
+    //         Expression::new_ident("x"), 
+    //         Expression::new_number(Number::one()), 
+    //         Expression::new_abs(
+    //             Expression::new_ident("y"), 
+    //             Type::None.into(), 
+    //             Expression::new_binop(Expression::new_ident("y"), BinOp::Add, Expression::new_ident("x")))),
+    //     Expression::new_app(Expression::new_ident("x"), Expression::new_number(Number::from_ulong(2))),
+    // );
     let prog = Expression::new_let(
-        Expression::new_ident("l"),
+        Expression::new_ident("x"),
+        Expression::new_number(Number::from_ulong(1)),
+        Expression::new_let(Expression::new_ident("z"), Expression::new_number(Number::from_ulong(2)),
         Expression::new_let(
-            Expression::new_ident("x"), 
-            Expression::new_number(Number::one()), 
-            Expression::new_abs(
-                Expression::new_ident("y"), 
-                Type::None.into(), 
-                Expression::new_binop(Expression::new_ident("y"), BinOp::Add, Expression::new_ident("x")))),
-        Expression::new_app(Expression::new_ident("l"), Expression::new_number(Number::from_ulong(2))),
+            Expression::new_ident("y"),
+            Expression::new_lam(
+                Expression::new_ident("x"),
+                Type::None.into(),
+                Expression::new_binop(Expression::new_ident("x"), BinOp::Add, Expression::new_ident("z")),
+            ), Expression::new_app(Expression::new_ident("y"), Expression::new_number(Number::from_ulong(2)))))
     );
-    // println!("{:?}", &prog);
+    println!("{:?}", &prog);
     let mut m = Vec::new();
     let mut free_vars = Vec::new();
     let mut unique_names = HashSet::new();
     let prog = resolve_names(&mut m, &mut free_vars, &mut unique_names , 0, &prog);
-    // println!("{:?}", &prog);
+    println!("{:?}", &prog);
     let stackres = eval_stack(prog);
     println!("stack res = {:?}", stackres);
     // let prog = Expression::new_selector(
