@@ -1,10 +1,8 @@
 #![feature(if_let_guard)]
 #![feature(let_chains)]
-#![feature(once_cell)]
-#![feature(thread_local)]
-#![feature(new_uninit)]
 #![feature(arbitrary_self_types)]
 #![allow(non_upper_case_globals)]
+#![feature(hash_set_entry)]
 
 use calcium::Number;
 use core::panic;
@@ -17,211 +15,6 @@ macro_rules! simple_empty_finalize_trace {
             impl Finalize for $T {}
             unsafe impl Trace for $T { unsafe_empty_trace!(); }
         )*
-    }
-}
-
-pub mod calcium {
-    use std::fmt::{Debug, Display};
-
-    use auto_ops::impl_op_ex;
-    use std::cell::LazyCell;
-    use std::ffi::{c_long, c_ulong, c_void, CStr, CString};
-
-    use burrito::{
-        ca_add, ca_check_equal, ca_clear, ca_ctx_clear, ca_ctx_init, ca_ctx_struct, ca_div,
-        ca_get_fmpz, ca_get_str, ca_init, ca_mul, ca_one, ca_pi, ca_set_d, ca_set_fmpq, ca_set_si,
-        ca_set_ui, ca_struct, ca_sub, ca_zero, flint_cleanup, flint_free, fmpq, fmpq_clear,
-        fmpq_init, fmpq_set_str, fmpz, fmpz_abs_fits_ui, fmpz_clear, fmpz_get_ui, fmpz_init,
-        fmpz_sgn, truth_t_T_FALSE, truth_t_T_TRUE,
-    };
-    use gc::{unsafe_empty_trace, Finalize, Trace};
-
-    pub struct Context {
-        ctx: *mut ca_ctx_struct,
-    }
-    impl Drop for Context {
-        fn drop(&mut self) {
-            unsafe {
-                ca_ctx_clear(self.ctx);
-                flint_cleanup();
-                drop(Box::from_raw(self.ctx));
-            }
-        }
-    }
-
-    #[thread_local]
-    pub static mut CALCIUM_CTX: LazyCell<Context> = LazyCell::new(|| unsafe {
-        let mut ctx = Box::<ca_ctx_struct>::new_uninit();
-        ca_ctx_init(ctx.as_mut_ptr());
-        Context {
-            ctx: Box::into_raw(ctx.assume_init()),
-        }
-    });
-
-    pub struct Number {
-        data: *mut ca_struct,
-    }
-
-    simple_empty_finalize_trace![Number];
-
-    // TODO: mutable update like +=?
-    impl Number {
-        pub fn new() -> Number {
-            unsafe {
-                let mut x = Box::<ca_struct>::new_uninit();
-                ca_init(x.as_mut_ptr(), CALCIUM_CTX.ctx);
-                Number {
-                    data: Box::into_raw(x.assume_init()),
-                }
-            }
-        }
-        pub fn zero() -> Number {
-            let x = Number::new();
-            unsafe {
-                ca_zero(x.data, CALCIUM_CTX.ctx);
-            }
-            x
-        }
-        pub fn one() -> Number {
-            let x = Number::new();
-            unsafe {
-                ca_one(x.data, CALCIUM_CTX.ctx);
-            }
-            x
-        }
-        pub fn pi() -> Number {
-            let x = Number::new();
-            unsafe {
-                ca_pi(x.data, CALCIUM_CTX.ctx);
-            }
-            x
-        }
-        pub fn from_clong(i: c_long) -> Number {
-            let x = Number::new();
-            unsafe {
-                ca_set_si(x.data, i, CALCIUM_CTX.ctx);
-            }
-            x
-        }
-        pub fn from_ulong(u: c_ulong) -> Number {
-            let x = Number::new();
-            unsafe {
-                ca_set_ui(x.data, u, CALCIUM_CTX.ctx);
-            }
-            x
-        }
-        pub fn from_f64(f: f64) -> Number {
-            let x = Number::new();
-            unsafe {
-                ca_set_d(x.data, f, CALCIUM_CTX.ctx);
-            }
-            x
-        }
-        pub fn from_str(s: &str) -> Option<Number> {
-            unsafe {
-                let mut x = Box::<fmpq>::new_uninit();
-                fmpq_init(x.as_mut_ptr());
-                let x = Box::into_raw(x.assume_init());
-                let cs = CString::new(s).unwrap();
-                let e = fmpq_set_str(x, cs.as_ptr(), 10);
-                let n = Number::new();
-                ca_set_fmpq(n.data, x, CALCIUM_CTX.ctx);
-                fmpq_clear(x);
-                drop(Box::from_raw(x));
-                if e == 0 {
-                    Some(n)
-                } else {
-                    None // maybe use an error message in the future
-                }
-            }
-        }
-    }
-    impl_op_ex!(+ |a: &Number, b: &Number| -> Number {
-        let res = Number::new();
-        unsafe { ca_add(res.data, a.data, b.data, CALCIUM_CTX.ctx); }
-        res
-    });
-    impl_op_ex!(-|a: &Number, b: &Number| -> Number {
-        let res = Number::new();
-        unsafe {
-            ca_sub(res.data, a.data, b.data, CALCIUM_CTX.ctx);
-        }
-        res
-    });
-    impl_op_ex!(*|a: &Number, b: &Number| -> Number {
-        let res = Number::new();
-        unsafe {
-            ca_mul(res.data, a.data, b.data, CALCIUM_CTX.ctx);
-        }
-        res
-    });
-    impl_op_ex!(/ |a: &Number, b: &Number| -> Number {
-        let res = Number::new();
-        unsafe { ca_div(res.data, a.data, b.data, CALCIUM_CTX.ctx); }
-        res
-    });
-    impl Into<usize> for Number {
-        fn into(self) -> usize {
-            (&self).into()
-        }
-    }
-    impl Into<usize> for &Number {
-        fn into(self) -> usize {
-            unsafe {
-                let mut x = Box::<fmpz>::new_uninit();
-                fmpz_init(x.as_mut_ptr());
-                let x = Box::into_raw(x.assume_init());
-                let e = ca_get_fmpz(x, self.data, CALCIUM_CTX.ctx);
-                if e == 0 {
-                    fmpz_clear(x);
-                    drop(Box::from_raw(x));
-                    panic!("is not integer");
-                }
-                if fmpz_sgn(x) < 0 || fmpz_abs_fits_ui(x) == 0 {
-                    panic!("does not fit into usize");
-                }
-                let ui = fmpz_get_ui(x);
-                fmpz_clear(x);
-                drop(Box::from_raw(x));
-                ui as usize
-            }
-        }
-    }
-    impl Drop for Number {
-        fn drop(&mut self) {
-            unsafe {
-                ca_clear(self.data, CALCIUM_CTX.ctx);
-                drop(Box::from_raw(self.data));
-            }
-        }
-    }
-    impl Eq for Number {}
-    impl PartialEq for Number {
-        fn eq(&self, other: &Self) -> bool {
-            unsafe {
-                let truth = ca_check_equal(self.data, other.data, CALCIUM_CTX.ctx);
-                match truth {
-                    truth_t_T_TRUE => true,
-                    truth_t_T_FALSE => false,
-                    _ => panic!("incomparable"),
-                }
-            }
-        }
-    }
-    impl Display for Number {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            unsafe {
-                let s = ca_get_str(self.data, CALCIUM_CTX.ctx);
-                let res = f.write_str(CStr::from_ptr(s).to_str().unwrap());
-                flint_free(s as *mut c_void);
-                res
-            }
-        }
-    }
-    impl Debug for Number {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            Display::fmt(&self, f)
-        }
     }
 }
 
@@ -240,7 +33,8 @@ enum Expression {
     Index(Gc<Expression>, Gc<Expression>),
     Ascribe(Gc<Expression>, Gc<Type>),
     Lam(Gc<Expression>, Gc<Type>, Gc<Expression>), // add ident for parameter so that it always looks it up in the context? is the param type necessary?
-    Ctl(Gc<Expression>, Gc<Type>, Gc<Expression>), // an effect handler
+    // Ctl(Gc<Expression>, Gc<Type>, Gc<Expression>, Option<usize>), // an effect handler
+    // Del(Vec<Frame>),
     Closure(Vec<(String, GcCell<Option<Gc<Expression>>>)>, Gc<Expression>),
     App(Gc<Expression>, Gc<Expression>), // Reuse for constructors?
     Fix(Gc<Expression>),
@@ -307,6 +101,17 @@ impl Expression {
     fn new_fix(x: Gc<Expression>) -> Gc<Expression> {
         Expression::Fix(x).into()
     }
+    // fn new_ctl(
+    //     bind: Gc<Expression>,
+    //     ty: Gc<Type>,
+    //     body: Gc<Expression>,
+    //     frame_index: Option<usize>,
+    // ) -> Gc<Expression> {
+    //     Expression::Ctl(bind, ty, body, frame_index).into()
+    // }
+    // fn new_del(del: Vec<Frame>) -> Gc<Expression> {
+    //     Expression::Del(del).into()
+    // }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -419,25 +224,37 @@ fn lookup_id(stack: &Vec<Frame>, s: &str) -> Gc<Expression> {
     panic!("variable {s} was not in scope")
 }
 
-fn resolve_names<'a>(m: &mut Vec<&'a str>, free_vars: &mut Vec<(String, GcCell<Option<Gc<Expression>>>)>, dist: usize, prog: &'a Gc<Expression>) -> Gc<Expression> {
+fn add_fresh_name<'a>(unique_names: &'a mut HashSet<String>, x: &str) -> &'a str {
+    let mut num = 1;
+    let mut to_check = x.to_owned();
+    while unique_names.contains(&to_check as &str) {
+        to_check = format!("{x}{num}");
+        num += 1;
+    }
+    unique_names.get_or_insert(to_check)
+}
+
+fn resolve_names<'a>(m: &mut Vec<(&'a str, &'a str)>, free_vars: &mut Vec<(String, GcCell<Option<Gc<Expression>>>)>, unique_names: &'a mut HashSet<String>, dist: usize, prog: &'a Gc<Expression>) -> Gc<Expression> {
     match &**prog {
         Expression::BinOp(l, op, r) => {
-            let l = resolve_names(m, free_vars, dist, l);
-            let r = resolve_names(m, free_vars, dist, r);
+            let l = resolve_names(m, free_vars, unique_names, dist, l);
+            let r = resolve_names(m, free_vars, unique_names, dist, r);
             Expression::new_binop(l, *op, r)
         },
         Expression::Let(bind, rhs, body) => {
-            let rhs = resolve_names(m, free_vars, dist, rhs);
+            let rhs = resolve_names(m, free_vars, unique_names, dist, rhs);
             let Expression::Ident(x) = &**bind else { panic!("expected identifier in let binding") };
-            m.push(x);
-            let body = resolve_names(m, free_vars, dist+1, body);
+            let fresh_name = add_fresh_name(unique_names, x);
+            m.push((x, fresh_name));
+            let body = resolve_names(m, free_vars, unique_names, dist+1, body);
             m.pop(); // pop here or inside?
+            unique_names.remove(fresh_name);
             Expression::new_let(bind.clone(), rhs, body)
         },
         Expression::If(cond, then, els) => {
-            let cond = resolve_names(m, free_vars, dist, cond);
-            let then = resolve_names(m, free_vars, dist,  then);
-            let els = resolve_names(m, free_vars, dist,  els);
+            let cond = resolve_names(m, free_vars, unique_names, dist, cond);
+            let then = resolve_names(m, free_vars, unique_names, dist,  then);
+            let els = resolve_names(m, free_vars, unique_names, dist,  els);
             Expression::new_if(cond, then, els)
         },
         Expression::Tuple(_) => todo!(),
@@ -450,34 +267,38 @@ fn resolve_names<'a>(m: &mut Vec<&'a str>, free_vars: &mut Vec<(String, GcCell<O
             // if not found, then it's a free variable
             // append to free_vars
             let mut i = 0;
-            let mut found = false;
-            while i <= dist {
-                let var = m[m.len() - i - 1];
-                if var == x {
-                    found = true;
+            let mut s: &str = x;
+            let mut is_local = false;
+            for var in m.iter().rev() {
+                if var.0 == x {
+                    is_local = i <= dist;
+                    // Look up the unique name for this binding and replace it with that.
+                    s = var.1;
                     break;
                 }
-                i += 1;
+                i+=1;
             }
-            if !found {
-                free_vars.push((x.to_string(), GcCell::new(None)));
+            if !is_local {
+                free_vars.push((s.to_string(), GcCell::new(None)));
             }
-            prog.clone()
+            return Expression::new_ident(s);
         },
         Expression::Lam(bind, /*TODO: resolve names in types */ ty, body) => {
             let Expression::Ident(x) = &**bind else { panic!("expected identifier in lambda binding") };
-            m.push(x);
+            let fresh_name = add_fresh_name(unique_names, x);
+            m.push((x, fresh_name));
             let mut free_vars = Vec::new();
-            let body = resolve_names(m, &mut free_vars, 0, body);
+            let body = resolve_names(m, &mut free_vars, unique_names, 0, body);
             m.pop();
+            unique_names.remove(fresh_name);
             Expression::new_closure(free_vars, Expression::new_abs(bind.clone(), ty.clone(), body))
         },
         Expression::App(fun, arg) => {
-            let fun = resolve_names(m, free_vars, dist, fun);
-            let arg = resolve_names(m, free_vars, dist, arg);
+            let fun = resolve_names(m, free_vars, unique_names, dist, fun);
+            let arg = resolve_names(m, free_vars, unique_names, dist, arg);
             Expression::new_app(fun, arg)
         },
-        Expression::Fix(x) => Expression::new_fix(resolve_names(m, free_vars, dist, x)),
+        Expression::Fix(x) => Expression::new_fix(resolve_names(m, free_vars, unique_names, dist, x)),
         Expression::Case(_, _) => todo!(),
         _ => prog.clone(),
     }
@@ -485,6 +306,7 @@ fn resolve_names<'a>(m: &mut Vec<&'a str>, free_vars: &mut Vec<(String, GcCell<O
 
 fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
     while let Some(frame) = stack.last() {
+        // let mut to_capture : Option<Gc<Expression>> = None;
         let mut to_set : Option<Gc<Expression>> = None;
         let mut to_push : Option<Frame> = None;
         match frame {
@@ -562,6 +384,9 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                 Expression::Ascribe(_, _) => todo!(),
                 Expression::Lam(_, _, _) => todo!(), // subsumed by closure
                 Expression::App(fun, arg) => match rv {
+                    // An App where fun is a continuation would require
+                    // pushing the stack frames of k
+                    // Are we sure that resume from the continuation isn't referenced accidentally?
                     Some(rv) => {
                         // let mut locals = locals.borrow_mut();
                         if locals.borrow().contains_key("2") {
@@ -573,17 +398,30 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                                 locals.insert("2".to_string(), rv.clone());
                                 locals.remove("1").unwrap()
                             };
-                            // eval body
-                            let Expression::Closure(env, abs) = &*v1 else { panic!("expected closure") };
-                            let Expression::Lam(bind, _, body) = &**abs else { panic!("expected abs") };
-                            let Expression::Ident(bind) = &**bind else { panic!("expected ident") };
-                            let mut fn_locals = HashMap::new();
-                            for (id, val) in env {
-                                let val = val.borrow().as_ref().unwrap().clone();
-                                fn_locals.insert(id.to_string(), val);
-                            }
-                            fn_locals.insert(bind.to_string(), rv.clone());
-                            to_push = Some(Frame::new_rec_hm(body.clone(), fn_locals));
+                            // if let Expression::Ctl(_, _, _, _) = *v1 {
+                            //     to_capture = Some(v1);
+                            //     /*
+                            //     If v1 is a Ctl expression, then we need to do a bunch of work.
+                            //     TODO: Do this at the end of the loop since we can't remove elements
+                            //     from the vector while holding a reference to a Frame.
+                            //     When we push a handler frame, we have to assign resume to be the cont.
+                            //     */
+                            //     // let Some(del) = *oi else { panic!("expected index") };
+                            //     // let k: Vec<Frame> = stack.drain(del..).collect();
+                            //     // let cont = DelimitedContinuation{ k };
+                            // } else {
+                                // eval body
+                                let Expression::Closure(env, abs) = &*v1 else { panic!("expected closure") };
+                                let Expression::Lam(bind, _, body) = &**abs else { panic!("expected abs") };
+                                let Expression::Ident(bind) = &**bind else { panic!("expected ident") };
+                                let mut fn_locals = HashMap::new();
+                                for (id, val) in env {
+                                    let val = val.borrow().as_ref().unwrap().clone();
+                                    fn_locals.insert(id.to_string(), val);
+                                }
+                                fn_locals.insert(bind.to_string(), rv.clone());
+                                to_push = Some(Frame::new_rec_hm(body.clone(), fn_locals));
+                            // }
                         } else {
                             // eval arg
                             locals.borrow_mut().insert("1".to_string(), rv.clone());
@@ -618,14 +456,33 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                     None => to_push = Some(Frame::new_rec(x.clone())),
                 },
                 Expression::Case(_, _) => todo!(),
-                Expression::Ctl(_, _, _) => {
-                    /*
-                        This is like the reset of a shift/reset.
-                        By constructing a handler, we set a delimiter on the stack.
-                    */
-                },
+                // Expression::Ctl(bind, ty, body, oi) => {
+                //     /*
+                //         This is like the reset of a shift/reset.
+                //         By constructing a handler, we set a delimiter on the stack.
+                //         Our approach right now will be to copy the part of the stack.
+                //     */
+                //     let i = stack.len()-1;
+                //     to_set = Some(Expression::new_ctl(bind.clone(), ty.clone(), body.clone(), Some(i)));
+                // },
+                // Expression::Del(k) => {
+                //     // we are invoking the continuation k
+                //     // i think that can be managed during application?
+                //     to_set = Some(expr.clone())
+                // },
             },
         }
+        // if let Some(Expression::Ctl(bind, ty, body, Some(del))) = to_capture.as_deref() {
+        //     let arg = {
+        //         let Some(Frame::Rec { expr, locals, rv }) = stack.last() else { panic!("expected record")};
+        //         locals.borrow().get("2").unwrap().clone()
+        //     };
+        //     let k : Vec<Frame> = stack.drain(del..).collect();
+        //     // create frame for handler
+        //     // push it onto the stack
+        //     let Expression::Ident(bind) = &**bind else { panic!("expected ident") };
+        //     to_push = Some(Frame::new_rec_locals(body.clone(), [(bind.clone(), arg), ("resume".to_string(), Expression::new_del(k))]));
+        // }
         if let Some(x) = to_set {
             set_rv(&mut stack, x);
         }
@@ -757,7 +614,8 @@ fn main() {
     // println!("{:?}", &prog);
     let mut m = Vec::new();
     let mut free_vars = Vec::new();
-    let prog = resolve_names(&mut m, &mut free_vars, 0, &prog);
+    let mut unique_names = HashSet::new();
+    let prog = resolve_names(&mut m, &mut free_vars, &mut unique_names , 0, &prog);
     // println!("{:?}", &prog);
     let stackres = eval_stack(prog);
     println!("stack res = {:?}", stackres);

@@ -4,6 +4,8 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
+    println!("cargo:rerun-if-changed=src/lib.rs");
+    println!("cargo:rerun-if-changed=build.rs");
     let bindings = bindgen::Builder::default()
         .header_contents("wrapper.h", r#"
             #include "ca_ext.h"
