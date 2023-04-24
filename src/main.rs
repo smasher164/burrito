@@ -33,8 +33,8 @@ enum Expression {
     Index(Gc<Expression>, Gc<Expression>),
     Ascribe(Gc<Expression>, Gc<Type>),
     Lam(Gc<Expression>, Gc<Type>, Gc<Expression>), // add ident for parameter so that it always looks it up in the context? is the param type necessary?
-    // Ctl(Gc<Expression>, Gc<Type>, Gc<Expression>, Option<usize>), // an effect handler
-    // Del(Vec<Frame>),
+    Ctl(Gc<Expression>, Gc<Expression>, Gc<Type>, Gc<Expression>, Option<usize>), // an effect handler
+    Del(Vec<Frame>),
     Closure(Vec<(String, GcCell<Option<Gc<Expression>>>)>, Gc<Expression>),
     App(Gc<Expression>, Gc<Expression>), // Reuse for constructors?
     Fix(Gc<Expression>),
@@ -100,6 +100,10 @@ impl Expression {
     }
     fn new_fix(x: Gc<Expression>) -> Gc<Expression> {
         Expression::Fix(x).into()
+    }
+
+    fn new_ctl(fresh_name_resume: Gc<Expression>, fresh_name_bind: Gc<Expression>, ty: Gc<Type>, body: Gc<Expression>, oi: Option<usize>) -> Gc<Expression> {
+        Expression::Ctl(fresh_name_resume, fresh_name_bind, ty, body, oi).into()
     }
     // fn new_ctl(
     //     bind: Gc<Expression>,
@@ -186,20 +190,21 @@ impl Context {
     }
 }
 
+#[derive(Debug, Trace, Finalize)]
 enum Frame {
     Rv(Option<Gc<Expression>>),
-    Rec {expr: Gc<Expression>, locals: RefCell<HashMap<String, Gc<Expression>>>, rv: Option<Gc<Expression>>},
+    Rec {expr: Gc<Expression>, locals: GcCell<HashMap<String, Gc<Expression>>>, rv: Option<Gc<Expression>>},
 }
 
 impl Frame {
     fn new_rec(x: Gc<Expression>) -> Frame {
-        Frame::Rec { expr: x, locals: RefCell::new(HashMap::new()), rv: None }
+        Frame::Rec { expr: x, locals: GcCell::new(HashMap::new()), rv: None }
     }
     fn new_rec_hm(x: Gc<Expression>, locals: HashMap<String, Gc<Expression>>) -> Frame {
-        Frame::Rec { expr: x, locals: RefCell::new(locals), rv: None }
+        Frame::Rec { expr: x, locals: GcCell::new(locals), rv: None }
     }
     fn new_rec_locals<const N: usize>(x: Gc<Expression>, locals: [(String, Gc<Expression>); N]) -> Frame {
-        Frame::Rec { expr: x, locals: RefCell::new(HashMap::from(locals)), rv: None }
+        Frame::Rec { expr: x, locals: GcCell::new(HashMap::from(locals)), rv: None }
     }
 }
 
@@ -248,8 +253,8 @@ fn resolve_names(m: &mut Vec<(String, String)>, free_vars: &mut Vec<(String, GcC
             let fresh_name = add_fresh_name(unique_names, x);
             m.push((x.clone(), fresh_name.clone()));
             let body = resolve_names(m, free_vars, unique_names, dist+1, body);
-            m.pop(); // pop here or inside?
-            unique_names.remove(&fresh_name);
+            m.pop();
+            unique_names.remove(&fresh_name); // TODO: is this necessary? don't we want globally unique names?
             Expression::new_let(Expression::new_ident(&fresh_name), rhs, body)
         },
         Expression::If(cond, then, els) => {
@@ -291,7 +296,7 @@ fn resolve_names(m: &mut Vec<(String, String)>, free_vars: &mut Vec<(String, GcC
             let mut free_vars = Vec::new();
             let body = resolve_names(m, &mut free_vars, unique_names, 0, body);
             m.pop();
-            unique_names.remove(&fresh_name);
+            unique_names.remove(&fresh_name); // TODO: is this necessary? don't we want globally unique names?
             Expression::new_closure(free_vars, Expression::new_lam(Expression::new_ident(&fresh_name), ty.clone(), body))
         },
         Expression::App(fun, arg) => {
@@ -301,6 +306,22 @@ fn resolve_names(m: &mut Vec<(String, String)>, free_vars: &mut Vec<(String, GcC
         },
         Expression::Fix(x) => Expression::new_fix(resolve_names(m, free_vars, unique_names, dist, x)),
         Expression::Case(_, _) => todo!(),
+        Expression::Ctl(resume_bind, param_bind, ty, body, oi) => { // TODO when we add tuples, make resume a field in the tuple
+            // since this is not a closure, we don't need to handle free vars
+            // treat this like Let
+            let Expression::Ident(resume_name) = &**resume_bind else { panic!("expected identifier in handler binding") };
+            let Expression::Ident(param_name) = &**param_bind else { panic!("expected identifier in handler binding") };
+            let fresh_name_resume = add_fresh_name(unique_names, resume_name);
+            let fresh_name_bind = add_fresh_name(unique_names, param_name);
+            m.push((resume_name.clone(), fresh_name_resume.clone()));
+            m.push((param_name.clone(), fresh_name_bind.clone()));
+            let body = resolve_names(m, free_vars, unique_names, dist+2, body);
+            m.pop();
+            m.pop();
+            unique_names.remove(&fresh_name_resume); // TODO: is this necessary? don't we want globally unique names?
+            unique_names.remove(&fresh_name_bind); // TODO: is this necessary? don't we want globally unique names?
+            Expression::new_ctl(Expression::new_ident(&fresh_name_resume), Expression::new_ident(&fresh_name_bind), ty.clone(), body, *oi)
+        },
         _ => prog.clone(),
     }
 }
@@ -318,7 +339,7 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                 Expression::Bool(_) => to_set = Some(expr.clone()),
                 Expression::String(_) => to_set = Some(expr.clone()),
                 Expression::Closure(env, abs) => {
-                    // for each free variable, look it up in the environment, and update the RefCell
+                    // for each free variable, look it up in the environment, and update the GcCell
                     for (name, cell) in env {
                         let val = lookup_id(&stack, name);
                         _ = cell.borrow_mut().insert(val);
@@ -457,6 +478,8 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                     None => to_push = Some(Frame::new_rec(x.clone())),
                 },
                 Expression::Case(_, _) => todo!(),
+                Expression::Ctl(_, _, _, _, _) => todo!(),
+                Expression::Del(_) => todo!(),
                 // Expression::Ctl(bind, ty, body, oi) => {
                 //     /*
                 //         This is like the reset of a shift/reset.
@@ -612,17 +635,14 @@ fn main() {
     //             Expression::new_binop(Expression::new_ident("y"), BinOp::Add, Expression::new_ident("x")))),
     //     Expression::new_app(Expression::new_ident("x"), Expression::new_number(Number::from_ulong(2))),
     // );
-    let prog = Expression::new_let(
-        Expression::new_ident("x"),
-        Expression::new_number(Number::from_ulong(1)),
+    let prog =
+    Expression::new_let(Expression::new_ident("x"),Expression::new_number(Number::from_ulong(1)),
         Expression::new_let(Expression::new_ident("z"), Expression::new_number(Number::from_ulong(2)),
-        Expression::new_let(
-            Expression::new_ident("y"),
-            Expression::new_lam(
+            Expression::new_let(Expression::new_ident("y"),Expression::new_lam(
                 Expression::new_ident("x"),
                 Type::None.into(),
                 Expression::new_binop(Expression::new_ident("x"), BinOp::Add, Expression::new_ident("z")),
-            ), Expression::new_app(Expression::new_ident("y"), Expression::new_number(Number::from_ulong(2)))))
+            ),Expression::new_app(Expression::new_ident("y"), Expression::new_number(Number::from_ulong(2)))))
     );
     println!("{:?}", &prog);
     let mut m = Vec::new();
