@@ -35,7 +35,6 @@ enum Expression {
     List(Vec<Gc<Expression>>),
     Selector(Gc<Expression>, Gc<Expression>),
     Index(Gc<Expression>, Gc<Expression>),
-    Ascribe(Gc<Expression>, Gc<Type>),
     Lam(Gc<Expression>, Gc<Type>, Gc<Expression>), // add ident for parameter so that it always looks it up in the context? is the param type necessary?
     Ctl(
         Gc<Expression>, /* The lambda/closure */
@@ -326,7 +325,6 @@ fn resolve_names(
         Expression::List(_) => todo!(),
         Expression::Selector(_, _) => todo!(),
         Expression::Index(_, _) => todo!(),
-        Expression::Ascribe(_, _) => todo!(),
         Expression::Ident(x) => {
             // look up x in m up to dist
             // if not found, then it's a free variable
@@ -480,7 +478,6 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                 Expression::List(_) => todo!(),
                 Expression::Selector(_, _) => todo!(),
                 Expression::Index(_, _) => todo!(),
-                Expression::Ascribe(_, _) => todo!(),
                 Expression::Lam(_, _, _) => todo!(), // subsumed by closure
                 Expression::App(fun, arg) =>{
                     // println!("{:?}", fun);
@@ -489,8 +486,6 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                     // pushing the stack frames of k
                     // Are we sure that resume from the continuation isn't referenced accidentally?
                     Some(rv) => {
-                        // TODO: how to handle resume?
-                        // let mut locals = locals.borrow_mut();
                         if locals.borrow().contains_key("2") {
                             // return body
                             to_set = Some(rv.clone());
@@ -519,33 +514,6 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                                     to_push = Some(Frame::new_rec_hm(body.clone(), fn_locals));
                                 }
                             }
-                            // if let Expression::Del(k) = *v1 
-                            // if let Expression::Ctl(_, _) = *v1 {
-                            //     to_capture = Some(v1);
-                            // if let Expression::Ctl(_, _, _, _) = *v1 {
-                            //     to_capture = Some(v1);
-                            //     /*
-                            //     If v1 is a Ctl expression, then we need to do a bunch of work.
-                            //     TODO: Do this at the end of the loop since we can't remove elements
-                            //     from the vector while holding a reference to a Frame.
-                            //     When we push a handler frame, we have to assign resume to be the cont.
-                            //     */
-                            //     // let Some(del) = *oi else { panic!("expected index") };
-                            //     // let k: Vec<Frame> = stack.drain(del..).collect();
-                            //     // let cont = DelimitedContinuation{ k };
-                            // } else {
-                            //     // eval body
-                            //     let Expression::Closure(env, abs) = &*v1 else { panic!("expected closure") };
-                            //     let Expression::Lam(bind, _, body) = &**abs else { panic!("expected abs") };
-                            //     let Expression::Ident(bind) = &**bind else { panic!("expected ident") };
-                            //     let mut fn_locals = HashMap::new();
-                            //     for (id, val) in env {
-                            //         let val = val.borrow().as_ref().unwrap().clone();
-                            //         fn_locals.insert(id.to_string(), val);
-                            //     }
-                            //     fn_locals.insert(bind.to_string(), rv.clone());
-                            //     to_push = Some(Frame::new_rec_hm(body.clone(), fn_locals));
-                            // }
                         } else {
                             // eval arg
                             locals.borrow_mut().insert("1".to_string(), rv.clone());
@@ -592,33 +560,8 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                     None => to_push = Some(Frame::new_rec(fun.clone())),
                 },
                 Expression::Del(_) => to_set = Some(expr.clone()),
-                // Expression::Ctl(bind, ty, body, oi) => {
-                //     /*
-                //         This is like the reset of a shift/reset.
-                //         By constructing a handler, we set a delimiter on the stack.
-                //         Our approach right now will be to copy the part of the stack.
-                //     */
-                //     let i = stack.len()-1;
-                //     to_set = Some(Expression::new_ctl(bind.clone(), ty.clone(), body.clone(), Some(i)));
-                // },
-                // Expression::Del(k) => {
-                //     // we are invoking the continuation k
-                //     // i think that can be managed during application?
-                //     to_set = Some(expr.clone())
-                // },
             },
         }
-        // if let Some(Expression::Ctl(bind, ty, body, Some(del))) = to_capture.as_deref() {
-        //     let arg = {
-        //         let Some(Frame::Rec { expr, locals, rv }) = stack.last() else { panic!("expected record")};
-        //         locals.borrow().get("2").unwrap().clone()
-        //     };
-        //     let k : Vec<Frame> = stack.drain(del..).collect();
-        //     // create frame for handler
-        //     // push it onto the stack
-        //     let Expression::Ident(bind) = &**bind else { panic!("expected ident") };
-        //     to_push = Some(Frame::new_rec_locals(body.clone(), [(bind.clone(), arg), ("resume".to_string(), Expression::new_del(k))]));
-        // }
         if let Some(Expression::Del(v)) = to_restore.as_deref() {
             let arg = {
                 let Some(Frame::Rec { expr: _, locals, rv: _ }) = stack.last() else { panic!("expected record")};
@@ -724,7 +667,6 @@ fn eval(ctx: &Option<Gc<Context>>, x: &Gc<Expression>) -> Gc<Expression> {
         } else {
             todo!()
         },
-        Expression::Ascribe(x, _) => x.clone(),
         _ => panic!("unexpected expression"),
     }
 }
@@ -792,11 +734,7 @@ fn main() {
     //     ),
     // );
 
-    // exception example
-    /*
-        let x = ctl(fun(arg, k) -> k(arg))
-        in x(1) + 2
-    */
+
     println!(r#"evaluating
     let x = ctl(fun arg k -> k(arg))
     in x(1) + 2
@@ -823,8 +761,6 @@ fn main() {
     //     Expression::new_app(Expression::new_ident("x"), Expression::new_int(1))
     // );
 
-
-
     println!("{:?}", &prog);
     let mut m = Vec::new();
     let mut free_vars = Vec::new();
@@ -847,83 +783,4 @@ fn main() {
     //     )]),
     //     Expression::new_number(0),
     // );
-    // let prog : Gc<_> = Expression::If(
-    //     Expression::Bool(false).into(),
-    //     Expression::Number(3).into(),
-    //     Expression::BinOp(
-    //         Expression::Number(1).into(),
-    //         BinOp::Add,
-    //         Expression::Number(1).into(),
-    //     ).into(),
-    // ).into();
-    // let prog : Gc<_> = Expression::Tuple(
-    //     vec![
-    //         (None, Expression::Number(1).into()),
-    //         (Some(Expression::Ident(String::from("x").into()).into()),
-    //             Expression::BinOp(
-    //             Expression::Number(1).into(),
-    //             BinOp::Add,
-    //             Expression::Number(1).into(),
-    //         ).into()),
-    //     ],
-    // ).into();
-    // let ctx = None;
-    // let env: Gc<_> = Environment{
-    //     context: HashMap::new(),
-    //     parent: None,
-    // }.into();
-    // let res = eval(&ctx, &prog);
-    // println!("res={:?}", res);
-    // println!()
-    // unsafe {
-    //     let mut ctx: ca_ctx_struct = mem::zeroed();
-    //     let mut x: ca_struct = mem::zeroed();
-    //     ca_ctx_init(&mut ctx);
-    //     ca_init(&mut x, &mut ctx);
-    //     ca_pi(&mut x, &mut ctx);
-    //     ca_sub_ui(&mut x, &mut x, 3, &mut ctx);
-    //     ca_pow_ui(&mut x, &mut x, 2, &mut ctx);
-    //     ca_print(&mut x, &mut ctx);
-    //     println!();
-    //     println!("Computed with calcium-{}", CStr::from_ptr(calcium_version()).to_str().unwrap());
-    //     ca_clear(&mut x, &mut ctx);
-    //     ca_ctx_clear(&mut ctx);
-    //     flint_cleanup();
-    // }
-    // let one = Number::one();
-    // let pi = Number::pi();
-    // let one = Number::from_f64(0.1);
-    // let two = Number::from_f64(0.2);
-    // let a = Number::from_ulong(1) / Number::from_ulong(10);
-    // let b = Number::from_ulong(2) / Number::from_ulong(10);
-    // let c = Number::from_ulong(3) / Number::from_ulong(10);
-    // println!("a={}", a);
-    // println!("b={}", b);
-    // println!("c={}", c);
-    // println!("a+b==c:{}", a+b == c);
-    // let x = Number::from_str("1/2");
-    // println!("x={}", x.unwrap());
-    // let y : usize = Number::from_ulong(1).into();
-    // println!("y={}", y);
-    // unsafe {
-    // let mut ctx = MaybeUninit::<ca_ctx_struct>::uninit();
-    // ca_ctx_init(ctx.as_mut_ptr());
-    // let ctx = &mut ctx.assume_init() as *mut ca_ctx_struct;
-
-    // let mut ca = MaybeUninit::<ca_struct>::uninit();
-    // ca_init(ca.as_mut_ptr(), ctx);
-    // ca_one(ca.as_mut_ptr(), ctx);
-    // let ca = &mut ca.assume_init() as *mut ca_struct;
-    // let pctx = ctx.as_mut_ptr();
-    // let mut x: MaybeUninit<ca_struct> = MaybeUninit::uninit();
-    // let px = x.as_mut_ptr();
-    // ca_ctx_init(pctx);
-    // ctx.assume_init();
-    // let mut c = ctx.assume_init();
-    // let p: *mut ca_ctx_struct = &mut c as *mut ca_ctx_struct;
-    // let px : *mut ca_struct = x.as_mut_ptr();
-    // ca_one(px, pctx);
-    // x.assume_init();
-    // let one = &mut x.assume_init();
-    // }
 }
