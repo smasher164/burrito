@@ -370,22 +370,6 @@ fn resolve_names(
         Expression::Ctl(lam, i) => {
             Expression::new_ctl(resolve_names(m, free_vars, unique_names, dist, lam), i.clone())
         }
-        // Expression::Ctl(resume_bind, param_bind, ty, body, oi) => { // TODO when we add tuples, make resume a field in the tuple
-        //     // since this is not a closure, we don't need to handle free vars
-        //     // treat this like Let
-        //     let Expression::Ident(resume_name) = &**resume_bind else { panic!("expected identifier in handler binding") };
-        //     let Expression::Ident(param_name) = &**param_bind else { panic!("expected identifier in handler binding") };
-        //     let fresh_name_resume = add_fresh_name(unique_names, resume_name);
-        //     let fresh_name_bind = add_fresh_name(unique_names, param_name);
-        //     m.push((resume_name.clone(), fresh_name_resume.clone()));
-        //     m.push((param_name.clone(), fresh_name_bind.clone()));
-        //     let body = resolve_names(m, free_vars, unique_names, dist+2, body);
-        //     m.pop();
-        //     m.pop();
-        //     unique_names.remove(&fresh_name_resume); // TODO: is this necessary? don't we want globally unique names?
-        //     unique_names.remove(&fresh_name_bind); // TODO: is this necessary? don't we want globally unique names?
-        //     Expression::new_ctl(Expression::new_ident(&fresh_name_resume), Expression::new_ident(&fresh_name_bind), ty.clone(), body, *oi)
-        // },
         _ => prog.clone(),
     }
 }
@@ -425,36 +409,33 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                     to_set = Some(val)
                 },
                 Expression::BinOp(l, op, r) => match rv {
+                    None => to_push = Some(Frame::new_rec(l.clone())),
                     Some(v) => {
                         let mut locals = locals.borrow_mut();
-                        if let Some(v1) = locals.get("1") {
-                            let res = match (&**v1, op, &**v) {
-                                (Expression::Number(l), BinOp::Add, Expression::Number(r)) => Expression::new_number(l+r),
-                                (Expression::Number(l), BinOp::Sub, Expression::Number(r)) => Expression::new_number(l-r),
-                                (Expression::Number(l), BinOp::Mul, Expression::Number(r)) => Expression::new_number(l*r),
-                                (Expression::Number(l), BinOp::Div, Expression::Number(r)) => Expression::new_number(l/r),
-                                _ => panic!("left and right were not numbers"),
-                            };
-                            to_set = Some(res);
-                        } else {
-                            locals.insert("1".to_string(), v.clone());
-                            to_push = Some(Frame::new_rec(r.clone()));
+                        match locals.get("1") {
+                            None => {
+                                locals.insert("1".to_string(), v.clone());
+                                to_push = Some(Frame::new_rec(r.clone()));
+                            },
+                            Some(v1) => {
+                                let res = match (&**v1, op, &**v) {
+                                    (Expression::Number(l), BinOp::Add, Expression::Number(r)) => Expression::new_number(l+r),
+                                    (Expression::Number(l), BinOp::Sub, Expression::Number(r)) => Expression::new_number(l-r),
+                                    (Expression::Number(l), BinOp::Mul, Expression::Number(r)) => Expression::new_number(l*r),
+                                    (Expression::Number(l), BinOp::Div, Expression::Number(r)) => Expression::new_number(l/r),
+                                    _ => panic!("left and right were not numbers"),
+                                };
+                                to_set = Some(res);
+                            },
                         }
                     },
-                    None => to_push = Some(Frame::new_rec(l.clone())),
                 },
                 Expression::Let(id, x, body) if let Expression::Ident(id) = &**id => match rv {
+                    None => to_push = Some(Frame::new_rec(x.clone())),
                     Some(v) => {
                         // println!("let id={:?}", id);
                         let mut locals = locals.borrow_mut();
-                        if locals.contains_key("1") {
-                            let mut res = v.clone();
-                            if let Expression::Ctl(cls, FrameIndex::Set(d)) = &**v {
-                                res = Expression::new_ctl(cls.clone(), FrameIndex::Finished);
-                            }
-                            to_set = Some(res);
-                            // dump_frame_index(&v);
-                        } else {
+                        if !locals.contains_key("1") {
                             let mut res: Gc<Expression> = v.clone();
                             if let Expression::Ctl(cls, FrameIndex::Unset) = &**v {
                                 // if RHS is a Ctl, then we set its delimiter
@@ -466,12 +447,19 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                             }
                             locals.insert("1".to_string(), res.clone());
                             to_push = Some(Frame::new_rec_locals(body.clone(), [(id.clone(), res)]));
+                        } else {
+                            let mut res = v.clone();
+                            if let Expression::Ctl(cls, FrameIndex::Set(d)) = &**v {
+                                res = Expression::new_ctl(cls.clone(), FrameIndex::Finished);
+                            }
+                            to_set = Some(res);
+                            // dump_frame_index(&v);
                         }
                     },
-                    None => to_push = Some(Frame::new_rec(x.clone())),
                 },
                 Expression::Let(_, _, _) => todo!(),
                 Expression::If(cond, then, els) => match rv {
+                    None => to_push = Some(Frame::new_rec(cond.clone())),
                     Some(v) => {
                         let mut locals = locals.borrow_mut();
                         if locals.contains_key("1") {
@@ -486,7 +474,6 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                             }
                         }
                     },
-                    None => to_push = Some(Frame::new_rec(cond.clone())),
                 },
                 Expression::Tuple(_) => todo!(),
                 Expression::List(_) => todo!(),
@@ -501,17 +488,17 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                     }
                     to_set = Some(Expression::new_closure(env, bind.clone(), ty.clone(), body.clone()))
                 },
-                Expression::App(fun, arg) =>{
-                    // println!("{:?}", fun);
-                    match rv {
-                    // An App where fun is a continuation would require
-                    // pushing the stack frames of k
-                    // Are we sure that resume from the continuation isn't referenced accidentally?
-                    Some(rv) => {
-                        if locals.borrow().contains_key("2") {
-                            // return body
-                            to_set = Some(rv.clone());
-                        } else if locals.borrow().contains_key("1") {
+                Expression::App(fun, arg) => match rv {                    
+                    // eval fun
+                    None => to_push = Some(Frame::new_rec(fun.clone())),                    
+                    Some(rv) =>
+                    if !locals.borrow().contains_key("2") {
+                        if !locals.borrow().contains_key("1") {
+                            // eval arg
+                            locals.borrow_mut().insert("1".to_string(), rv.clone());
+                            to_push = Some(Frame::new_rec(arg.clone()));
+                        } else {
+                            // match against evaluated fun. eval body
                             let v1 : Gc<Expression> = {
                                 let mut locals = locals.borrow_mut();
                                 locals.insert("2".to_string(), rv.clone());
@@ -519,11 +506,11 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                             };
                             match &*v1 {
                                 Expression::Del(_) => to_restore = Some(v1.clone()),
-                                Expression::Ctl(cls, frame_index) => {
+                                Expression::Ctl(_, _) => {
                                     to_capture = Some(v1)
                                 },
                                 _ => {
-                                    let Expression::Closure(env, bind, ty, body) = &*v1 else { panic!("expected closure") };
+                                    let Expression::Closure(env, bind, _, body) = &*v1 else { panic!("expected closure") };
                                     let Expression::Ident(bind) = &**bind else { panic!("expected ident") };
                                     let mut fn_locals: HashMap<String, Gc<Expression>> = HashMap::new();
                                     for (id, val) in env {
@@ -532,26 +519,18 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                                     fn_locals.insert(bind.to_string(), rv.clone());
                                     to_push = Some(Frame::new_rec_hm(body.clone(), fn_locals));
                                 }
-                            }
-                        } else {
-                            // eval arg
-                            locals.borrow_mut().insert("1".to_string(), rv.clone());
-                            to_push = Some(Frame::new_rec(arg.clone()));
+                            }                                 
                         }
+                    } else {
+                        // return evaluated body
+                        to_set = Some(rv.clone());
                     },
-                    // eval fun
-                    None => to_push = Some(Frame::new_rec(fun.clone())),
-                }
-            },
+                },
                 Expression::Fix(x) => match rv {
+                    None => to_push = Some(Frame::new_rec(x.clone())),
                     Some(rv) => {
-                        // let mut locals = locals.borrow_mut();
-                        if locals.borrow().contains_key("1") {
-                            to_set = Some(rv.clone());
-                        } else {
-                            {
-                                locals.borrow_mut().insert("1".to_string(), rv.clone());
-                            }
+                        if !locals.borrow().contains_key("1") {
+                            locals.borrow_mut().insert("1".to_string(), rv.clone());
                             let Expression::Closure(env, bind, ty, body) = &**rv else { panic!("expected closure") };
                             let Expression::Ident(bind) = &**bind else { panic!("expected ident") };
                             let mut fn_locals = HashMap::new();
@@ -561,20 +540,21 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                             let arg = Expression::new_fix(rv.clone());
                             fn_locals.insert(bind.to_string(), arg);
                             to_push = Some(Frame::new_rec_hm(body.clone(), fn_locals));
+                        } else {
+                            to_set = Some(rv.clone());
                         }
                     },
-                    None => to_push = Some(Frame::new_rec(x.clone())),
                 },
                 Expression::Case(_, _) => todo!(),
                 // Expression::Ctl(_, _, _, _, _) => todo!(),
                 Expression::Ctl(fun, frame_index) => match rv {
                     // Evaluate fun to a closure
                     // Return a Ctl expression with the closure and the frame index
+                    None => to_push = Some(Frame::new_rec(fun.clone())),
                     Some(cls) => {
                         let Expression::Closure(_, _, _, _) = &**cls else { panic!("expected closure") };
                         to_set = Some(Expression::new_ctl(cls.clone(), frame_index.clone()))
                     },
-                    None => to_push = Some(Frame::new_rec(fun.clone())),
                 },
                 Expression::Del(_) => to_set = Some(expr.clone()),
             },
