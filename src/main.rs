@@ -22,7 +22,7 @@ macro_rules! simple_empty_finalize_trace {
     }
 }
 
-#[derive(Debug, Trace, Finalize)]
+#[derive(Debug, Trace, Finalize, Clone)]
 enum Expression {
     Number(calcium::Number),
     Bool(bool),
@@ -32,7 +32,7 @@ enum Expression {
     Let(Gc<Expression>, Gc<Expression>, Gc<Expression>),
     If(Gc<Expression>, Gc<Expression>, Gc<Expression>),
     Tuple(Vec<(Option<Gc<Expression>>, Gc<Expression>)>),
-    List(Vec<Gc<Expression>>),
+    List(GcCell<Vec<Gc<Expression>>>),
     Selector(Gc<Expression>, Gc<Expression>),
     Index(Gc<Expression>, Gc<Expression>),
     Lam(Vec<String>, Gc<Expression>, Gc<Type>, Gc<Expression>), // add ident for parameter so that it always looks it up in the context? is the param type necessary?
@@ -48,7 +48,6 @@ enum Expression {
     App(Gc<Expression>, Gc<Expression>), // Reuse for constructors?
     Fix(Gc<Expression>),
     Case(Gc<Expression>, Vec<(String, String, Gc<Expression>)>), // Compile exhaustive patterns to this, since all we need is an eliminator.
-                                                                 // TODO: Effects
 }
 
 #[derive(Debug, Trace, Finalize)]
@@ -93,7 +92,7 @@ impl Expression {
     fn new_tuple(v: Vec<(Option<Gc<Expression>>, Gc<Expression>)>) -> Gc<Expression> {
         Expression::Tuple(v).into()
     }
-    fn new_list(v: Vec<Gc<Expression>>) -> Gc<Expression> {
+    fn new_list(v: GcCell<Vec<Gc<Expression>>>) -> Gc<Expression> {
         Expression::List(v).into()
     }
     fn new_selector(x: Gc<Expression>, field: Gc<Expression>) -> Gc<Expression> {
@@ -189,36 +188,36 @@ simple_empty_finalize_trace![BinOp];
 //     x: Gc<Expression>,
 // }
 
-#[derive(Trace, Finalize)]
-struct Context {
-    // stored at front (prepended)
-    parent: Option<Gc<Context>>,
-    name: String,
-    x: Gc<Expression>,
-}
+// #[derive(Trace, Finalize)]
+// struct Context {
+//     // stored at front (prepended)
+//     parent: Option<Gc<Context>>,
+//     name: String,
+//     x: Gc<Expression>,
+// }
 
-impl Context {
-    fn lookup(self: Gc<Context>, name: &String) -> Gc<Expression> {
-        if &self.name == name {
-            self.x.clone()
-        } else if let Some(p) = self.parent.clone() {
-            p.lookup(name)
-        } else {
-            panic!("couldn't find identifier")
-        }
-    }
-    fn with(self: Gc<Context>, name: String, x: &Gc<Expression>) -> Gc<Context> {
-        Context::new(Some(self), name, x)
-    }
-    fn new(parent: Option<Gc<Context>>, name: String, x: &Gc<Expression>) -> Gc<Context> {
-        Context {
-            parent: parent,
-            name: name,
-            x: x.clone(),
-        }
-        .into()
-    }
-}
+// impl Context {
+//     fn lookup(self: Gc<Context>, name: &String) -> Gc<Expression> {
+//         if &self.name == name {
+//             self.x.clone()
+//         } else if let Some(p) = self.parent.clone() {
+//             p.lookup(name)
+//         } else {
+//             panic!("couldn't find identifier")
+//         }
+//     }
+//     fn with(self: Gc<Context>, name: String, x: &Gc<Expression>) -> Gc<Context> {
+//         Context::new(Some(self), name, x)
+//     }
+//     fn new(parent: Option<Gc<Context>>, name: String, x: &Gc<Expression>) -> Gc<Context> {
+//         Context {
+//             parent: parent,
+//             name: name,
+//             x: x.clone(),
+//         }
+//         .into()
+//     }
+// }
 
 #[derive(Debug, Trace, Finalize, Clone)]
 enum Frame {
@@ -324,7 +323,11 @@ fn resolve_names(
             Expression::new_if(cond, then, els)
         }
         Expression::Tuple(_) => todo!(),
-        Expression::List(_) => todo!(),
+        Expression::List(l) => {
+            // we're not mutating in place. we're creating a new vector.
+            let v: Vec<Gc<Expression>> = l.borrow().iter().map(|e| resolve_names(m, free_vars, unique_names, dist, e)).collect();
+            Expression::new_list(GcCell::new(v))
+        },
         Expression::Selector(_, _) => todo!(),
         Expression::Index(_, _) => todo!(),
         Expression::Ident(x) => {
@@ -476,7 +479,31 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                     },
                 },
                 Expression::Tuple(_) => todo!(),
-                Expression::List(_) => todo!(),
+                Expression::List(l) => match rv {
+                    None => {
+                        let mut locals = locals.borrow_mut();
+                        let l = l.borrow();
+                        locals.insert("1".to_string(), Expression::new_list(GcCell::new(Vec::with_capacity(l.len()))));
+                        if let Some(elem) = l.first() {
+                            to_push = Some(Frame::new_rec(elem.clone()));
+                        }
+                    },
+                    Some(v) => {
+                        let locals = locals.borrow();
+                        let vc = locals.get("1").unwrap();
+// TODO: I think I need to make it a GcCell
+                        let Expression::List(dst) = &**vc else { panic!("expected list") };
+                        let mut dst = dst.borrow_mut();
+                        dst.push(v.clone());
+                        let i = dst.len();
+                        if i == l.borrow().len() {
+                            to_set = Some(vc.clone());
+                        } else {
+                            let elem = &l.borrow()[i];
+                            to_push = Some(Frame::new_rec(elem.clone()));
+                        }
+                    },
+                },
                 Expression::Selector(_, _) => todo!(),
                 Expression::Index(_, _) => todo!(),
                 Expression::Lam(free_vars, bind, ty, body) => {
@@ -730,17 +757,26 @@ fn main() {
     // );
 
 
+    // println!(r#"evaluating
+    // let x = ctl(fun arg k -> k(arg))
+    // in x(1) + 2
+    // "#);
+    // let prog = Expression::new_let(
+    //     Expression::new_ident("x"),
+    //     Expression::new_ctl(Expression::new_slam("arg", Expression::new_slam("k", Expression::new_app(Expression::new_ident("k"), Expression::new_ident("arg")))),FrameIndex::Unset),
+    //     Expression::new_binop(Expression::new_app(Expression::new_ident("x"), Expression::new_int(1)), BinOp::Add, Expression::new_int(2))
+    //     // Expression::new_ctl(Expression::new_lam(Expression::new_ident("arg"), Type::None.into(), Expression::new_lam(Expression::new_ident("k"), Type::None.into(), Expression::new_app(Expression::new_ident("k"), Expression::new_ident("arg")))), GcCell::new(0)),
+    //     // Expression::new_binop(Expression::new_app(Expression::new_ident("x"), Expression::new_number(Number::one())), BinOp::Add, Expression::new_number(Number::from_ulong(2)))
+    // );
     println!(r#"evaluating
-    let x = ctl(fun arg k -> k(arg))
-    in x(1) + 2
+    list(1+1, 2+2, 3+3)
     "#);
-    let prog = Expression::new_let(
-        Expression::new_ident("x"),
-        Expression::new_ctl(Expression::new_slam("arg", Expression::new_slam("k", Expression::new_app(Expression::new_ident("k"), Expression::new_ident("arg")))),FrameIndex::Unset),
-        Expression::new_binop(Expression::new_app(Expression::new_ident("x"), Expression::new_int(1)), BinOp::Add, Expression::new_int(2))
-        // Expression::new_ctl(Expression::new_lam(Expression::new_ident("arg"), Type::None.into(), Expression::new_lam(Expression::new_ident("k"), Type::None.into(), Expression::new_app(Expression::new_ident("k"), Expression::new_ident("arg")))), GcCell::new(0)),
-        // Expression::new_binop(Expression::new_app(Expression::new_ident("x"), Expression::new_number(Number::one())), BinOp::Add, Expression::new_number(Number::from_ulong(2)))
-    );
+    let prog = 
+        Expression::new_list(GcCell::new(vec![
+            Expression::new_binop(Expression::new_int(1), BinOp::Add, Expression::new_int(1)),
+            Expression::new_binop(Expression::new_int(2), BinOp::Add, Expression::new_int(2)),
+            Expression::new_binop(Expression::new_int(3), BinOp::Add, Expression::new_int(3)),
+        ]));
 
     // println!(r#"evaluating
     // let x =

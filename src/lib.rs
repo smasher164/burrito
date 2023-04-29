@@ -26,7 +26,7 @@ mod ext {
     use ext::{
         ca_add, ca_check_equal, ca_clear, ca_ctx_clear, ca_ctx_init, ca_ctx_struct, ca_div,
         ca_get_fmpz, ca_get_str, ca_init, ca_mul, ca_one, ca_pi, ca_set_d, ca_set_fmpq, ca_set_si,
-        ca_set_ui, ca_struct, ca_sub, ca_zero, flint_cleanup, flint_free, fmpq, fmpq_clear,
+        ca_set_ui, ca_set, ca_struct, ca_sub, ca_zero, flint_cleanup, flint_free, fmpq, fmpq_clear,
         fmpq_init, fmpq_set_str, fmpz, fmpz_abs_fits_ui, fmpz_clear, fmpz_get_ui, fmpz_init,
         fmpz_sgn, truth_t_T_FALSE, truth_t_T_TRUE,
     };
@@ -217,6 +217,16 @@ mod ext {
     impl Debug for Number {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             Display::fmt(&self, f)
+        }
+    }
+
+    impl Clone for Number {
+        fn clone(&self) -> Self {
+            let dst = Number::new();
+            unsafe {
+                ca_set(dst.data, self.data, CALCIUM_CTX.ctx);
+            }
+            dst
         }
     }
 // }
