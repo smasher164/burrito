@@ -35,15 +35,15 @@ enum Expression {
     List(Vec<Gc<Expression>>),
     Selector(Gc<Expression>, Gc<Expression>),
     Index(Gc<Expression>, Gc<Expression>),
-    Lam(Gc<Expression>, Gc<Type>, Gc<Expression>), // add ident for parameter so that it always looks it up in the context? is the param type necessary?
+    Lam(Vec<String>, Gc<Expression>, Gc<Type>, Gc<Expression>), // add ident for parameter so that it always looks it up in the context? is the param type necessary?
     Ctl(
         Gc<Expression>, /* The lambda/closure */
-        usize,          /* the index of the starting frame of the delimited continuation */
+        FrameIndex,          /* the index of the starting frame of the delimited continuation */
     ), // an effect handler
     Del(Vec<Frame>),                               // a delimited continuation
     Closure(
-        Vec<(String, GcCell<Option<Gc<Expression>>>)>,
-        Gc<Expression>,
+        Vec<(String, Gc<Expression>)>,
+        Gc<Expression>, Gc<Type>, Gc<Expression>
     ),
     App(Gc<Expression>, Gc<Expression>), // Reuse for constructors?
     Fix(Gc<Expression>),
@@ -102,20 +102,22 @@ impl Expression {
     fn new_index(x: Gc<Expression>, i: Gc<Expression>) -> Gc<Expression> {
         Expression::Index(x, i).into()
     }
-    fn new_lam(bind: Gc<Expression>, ty: Gc<Type>, body: Gc<Expression>) -> Gc<Expression> {
-        Expression::Lam(bind, ty, body).into()
+    fn new_lam(free_vars: Vec<String>, bind: Gc<Expression>, ty: Gc<Type>, body: Gc<Expression>) -> Gc<Expression> {
+        Expression::Lam(free_vars, bind, ty, body).into()
     }
-    fn new_sulam(bind: &str, body: Gc<Expression>) -> Gc<Expression> {
-        Expression::new_lam(Expression::new_ident(bind), Type::None.into(), body)
+    fn new_slam(bind: &str, body: Gc<Expression>) -> Gc<Expression> {
+        Expression::new_lam(Vec::new(), Expression::new_ident(bind), Type::None.into(), body)
     }
     fn new_app(fun: Gc<Expression>, arg: Gc<Expression>) -> Gc<Expression> {
         Expression::App(fun, arg).into()
     }
     fn new_closure(
-        env: Vec<(String, GcCell<Option<Gc<Expression>>>)>,
-        lam: Gc<Expression>,
+        env: Vec<(String, Gc<Expression>)>,
+        bind: Gc<Expression>,
+        ty: Gc<Type>,
+        body: Gc<Expression>,
     ) -> Gc<Expression> {
-        Expression::Closure(env, lam).into()
+        Expression::Closure(env, bind, ty, body).into()
     }
     fn new_fix(x: Gc<Expression>) -> Gc<Expression> {
         Expression::Fix(x).into()
@@ -125,7 +127,7 @@ impl Expression {
     //     Expression::Ctl(fresh_name_resume, fresh_name_bind, ty, body, oi).into()
     // }
 
-    fn new_ctl(lam: Gc<Expression>, frame_index: usize) -> Gc<Expression> {
+    fn new_ctl(lam: Gc<Expression>, frame_index: FrameIndex) -> Gc<Expression> {
         Expression::Ctl(lam, frame_index).into()
     }
 
@@ -294,7 +296,7 @@ fn add_fresh_name(unique_names: &mut HashSet<String>, x: &str) -> String {
 
 fn resolve_names(
     m: &mut Vec<(String, String)>,
-    free_vars: &mut Vec<(String, GcCell<Option<Gc<Expression>>>)>,
+    free_vars: &mut Vec<String>,
     unique_names: &mut HashSet<String>,
     dist: usize,
     prog: &Gc<Expression>,
@@ -342,11 +344,11 @@ fn resolve_names(
                 i += 1;
             }
             if !is_local {
-                free_vars.push((s.to_string(), GcCell::new(None)));
+                free_vars.push(s.to_string());
             }
             return Expression::new_ident(&s);
         }
-        Expression::Lam(bind, /*TODO: resolve names in types */ ty, body) => {
+        Expression::Lam(_, bind, /*TODO: resolve names in types */ ty, body) => {
             let Expression::Ident(x) = &**bind else { panic!("expected identifier in lambda binding") };
             let fresh_name = add_fresh_name(unique_names, x);
             m.push((x.clone(), fresh_name.clone()));
@@ -354,10 +356,7 @@ fn resolve_names(
             let body = resolve_names(m, &mut free_vars, unique_names, 0, body);
             m.pop();
             unique_names.remove(&fresh_name); // TODO: is this necessary? don't we want globally unique names?
-            Expression::new_closure(
-                free_vars,
-                Expression::new_lam(Expression::new_ident(&fresh_name), ty.clone(), body),
-            )
+            Expression::new_lam(free_vars, Expression::new_ident(&fresh_name), ty.clone(), body)
         }
         Expression::App(fun, arg) => {
             let fun = resolve_names(m, free_vars, unique_names, dist, fun);
@@ -369,7 +368,7 @@ fn resolve_names(
         }
         Expression::Case(_, _) => todo!(),
         Expression::Ctl(lam, i) => {
-            Expression::new_ctl(resolve_names(m, free_vars, unique_names, dist, lam), *i)
+            Expression::new_ctl(resolve_names(m, free_vars, unique_names, dist, lam), i.clone())
         }
         // Expression::Ctl(resume_bind, param_bind, ty, body, oi) => { // TODO when we add tuples, make resume a field in the tuple
         //     // since this is not a closure, we don't need to handle free vars
@@ -391,6 +390,21 @@ fn resolve_names(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FrameIndex {
+    Unset,
+    Finished,
+    Set(usize),
+}
+
+simple_empty_finalize_trace!(FrameIndex);
+
+fn dump_frame_index(x: &Gc<Expression>) {
+    if let Expression::Ctl(_, frame_index) = &**x {
+        println!("frame_index={:?}", frame_index);
+    }
+}
+
 fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
     while let Some(frame) = stack.last() {
         let mut to_capture : Option<Gc<Expression>> = None;
@@ -404,15 +418,9 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                 Expression::Number(_) => to_set = Some(expr.clone()),
                 Expression::Bool(_) => to_set = Some(expr.clone()),
                 Expression::String(_) => to_set = Some(expr.clone()),
-                Expression::Closure(env, abs) => {
-                    // for each free variable, look it up in the environment, and update the GcCell
-                    for (name, cell) in env {
-                        let val = lookup_id(&stack, name);
-                        _ = cell.borrow_mut().insert(val);
-                    }
-                    to_set = Some(expr.clone())
-                },
+                Expression::Closure(_, _, _, _) => to_set = Some(expr.clone()),
                 Expression::Ident(s) => {
+                    // println!("lookup id={:?}", s);
                     let val = lookup_id(&stack, s);
                     to_set = Some(val)
                 },
@@ -437,18 +445,24 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                 },
                 Expression::Let(id, x, body) if let Expression::Ident(id) = &**id => match rv {
                     Some(v) => {
+                        // println!("let id={:?}", id);
                         let mut locals = locals.borrow_mut();
                         if locals.contains_key("1") {
-                            to_set = Some(v.clone());
-                        } else {
                             let mut res = v.clone();
-                            if let Expression::Ctl(cls, 0) = &**v {
+                            if let Expression::Ctl(cls, FrameIndex::Set(d)) = &**v {
+                                res = Expression::new_ctl(cls.clone(), FrameIndex::Finished);
+                            }
+                            to_set = Some(res);
+                            // dump_frame_index(&v);
+                        } else {
+                            let mut res: Gc<Expression> = v.clone();
+                            if let Expression::Ctl(cls, FrameIndex::Unset) = &**v {
                                 // if RHS is a Ctl, then we set its delimiter
                                 // This is like the reset of a shift/reset.
                                 // By constructing a handler, we set a delimiter on the stack.
                                 // Our approach right now will be to copy the part of the stack.
                                 // The delimiter will be that of the body, so it will be 1+the index of the current frame.
-                                res = Expression::new_ctl(cls.clone(), stack.len());
+                                res = Expression::new_ctl(cls.clone(), FrameIndex::Set(stack.len()));
                             }
                             locals.insert("1".to_string(), res.clone());
                             to_push = Some(Frame::new_rec_locals(body.clone(), [(id.clone(), res)]));
@@ -478,7 +492,15 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                 Expression::List(_) => todo!(),
                 Expression::Selector(_, _) => todo!(),
                 Expression::Index(_, _) => todo!(),
-                Expression::Lam(_, _, _) => todo!(), // subsumed by closure
+                Expression::Lam(free_vars, bind, ty, body) => {
+                    // For each free variable, look it up in the environment and create closure object with it.
+                    let mut env = Vec::with_capacity(free_vars.len());
+                    for name in free_vars {
+                        let val = lookup_id(&stack, name);
+                        env.push((name.clone(), val));
+                    }
+                    to_set = Some(Expression::new_closure(env, bind.clone(), ty.clone(), body.clone()))
+                },
                 Expression::App(fun, arg) =>{
                     // println!("{:?}", fun);
                     match rv {
@@ -498,17 +520,14 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                             match &*v1 {
                                 Expression::Del(_) => to_restore = Some(v1.clone()),
                                 Expression::Ctl(cls, frame_index) => {
-                                    // println!("{:?} and frame_index={}, len={}", cls, *frame_index, stack.len());
                                     to_capture = Some(v1)
                                 },
                                 _ => {
-                                    let Expression::Closure(env, abs) = &*v1 else { panic!("expected closure") };
-                                    let Expression::Lam(bind, _, body) = &**abs else { panic!("expected abs") };
+                                    let Expression::Closure(env, bind, ty, body) = &*v1 else { panic!("expected closure") };
                                     let Expression::Ident(bind) = &**bind else { panic!("expected ident") };
-                                    let mut fn_locals = HashMap::new();
+                                    let mut fn_locals: HashMap<String, Gc<Expression>> = HashMap::new();
                                     for (id, val) in env {
-                                        let val = val.borrow().as_ref().unwrap().clone();
-                                        fn_locals.insert(id.to_string(), val);
+                                        fn_locals.insert(id.to_string(), val.clone());
                                     }
                                     fn_locals.insert(bind.to_string(), rv.clone());
                                     to_push = Some(Frame::new_rec_hm(body.clone(), fn_locals));
@@ -533,13 +552,11 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                             {
                                 locals.borrow_mut().insert("1".to_string(), rv.clone());
                             }
-                            let Expression::Closure(env, abs) = &**rv else { panic!("expected closure") };
-                            let Expression::Lam(bind, _, body) = &**abs else { panic!("expected abs") };
+                            let Expression::Closure(env, bind, ty, body) = &**rv else { panic!("expected closure") };
                             let Expression::Ident(bind) = &**bind else { panic!("expected ident") };
                             let mut fn_locals = HashMap::new();
                             for (id, val) in env {
-                                let val = val.borrow().as_ref().unwrap().clone();
-                                fn_locals.insert(id.to_string(), val);
+                                fn_locals.insert(id.to_string(), val.clone());
                             }
                             let arg = Expression::new_fix(rv.clone());
                             fn_locals.insert(bind.to_string(), arg);
@@ -554,8 +571,8 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                     // Evaluate fun to a closure
                     // Return a Ctl expression with the closure and the frame index
                     Some(cls) => {
-                        let Expression::Closure(_, _) = &**cls else { panic!("expected closure") };
-                        to_set = Some(Expression::new_ctl(cls.clone(), *frame_index))
+                        let Expression::Closure(_, _, _, _) = &**cls else { panic!("expected closure") };
+                        to_set = Some(Expression::new_ctl(cls.clone(), frame_index.clone()))
                     },
                     None => to_push = Some(Frame::new_rec(fun.clone())),
                 },
@@ -577,9 +594,7 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                 let Some(Frame::Rec { expr: _, locals, rv: _ }) = stack.last() else { panic!("expected record")};
                 locals.borrow().get("2").unwrap().clone()
             };
-            if *del >= stack.len() {
-                panic!("handler out of scope"); // TODO: make this an effect as well
-            }
+            let FrameIndex::Set(del) = *del else { panic!("handler out of scope") }; // TODO: make this an effect as well
             let k : Vec<Frame> = stack.drain(del..).collect();
             let next_exp = Expression::new_app(Expression::new_app(cls.clone(), arg), Expression::new_del(k)); // do we want cls arg k or cls k arg?
             // println!("pushing cls arg k");
@@ -599,77 +614,77 @@ fn eval_stack(x: Gc<Expression>) -> Gc<Expression> {
     eval_with_stack(vec![Frame::Rv(None), Frame::new_rec(x)])
 }
 
-fn eval(ctx: &Option<Gc<Context>>, x: &Gc<Expression>) -> Gc<Expression> {
-    let (ctx, x) = (ctx.clone(), x.clone());
-    match &*x {
-        Expression::Number(_) => x,
-        Expression::Bool(_) => x,
-        Expression::String(_) => x,
-        Expression::BinOp(left, op, right) => match (&*eval(&ctx, left), op, &*eval(&ctx, right)) {
-            (Expression::Number(l), BinOp::Add, Expression::Number(r)) => Expression::new_number(l+r),
-            (Expression::Number(l), BinOp::Sub, Expression::Number(r)) => Expression::new_number(l-r),
-            (Expression::Number(l), BinOp::Mul, Expression::Number(r)) => Expression::new_number(l*r),
-            (Expression::Number(l), BinOp::Div, Expression::Number(r)) => Expression::new_number(l/r),
-            _ => panic!("left and right were not numbers")
-        },
-        Expression::Ident(id) if let Some(ctx) = ctx => ctx.lookup(id),
-        Expression::Let(id, v, x) if let Expression::Ident(id) = &**id => match ctx.clone() {
-            Some(ctx) => eval(&Some(ctx.with(id.to_string(), v)), x),
-            None => eval(&Some(Context::new(None, id.to_string(), v)), x),
-        },
-        Expression::If(cond, then, els) if let Expression::Bool(cond) = *eval(&ctx, cond) =>
-            if cond { eval(&ctx, then) } else { eval(&ctx, els) },
-        Expression::Tuple(elements) => Expression::new_tuple(elements.iter().map(
-            |elem| (elem.0.clone(), eval(&ctx, &elem.1))
-        ).collect()),
-        Expression::List(elements) => Expression::new_list(elements.iter().map(|elem| eval(&ctx, elem)).collect()),
-        Expression::Selector(x, sel) if let Expression::Ident(id) = &**sel =>
-        if let Expression::Tuple(r) = &*eval(&ctx, x) {
-            r.iter().find_map(|ele|
-                if let Some(x) = &ele.0 && let Expression::Ident(got)= &**x && id == got {
-                    Some(ele.1.clone())
-                } else {
-                    None
-                }).unwrap()
-        } else {
-            panic!("selector expression wasn't made up of tuple and ident")
-        },
-        Expression::Index(x, i) if let Expression::Number(i) = &*eval(&ctx, i) => match &*eval(&ctx, x) {
-            Expression::Tuple(r) => r[Into::<usize>::into(i)].1.clone(),
-            Expression::List(l) => l[Into::<usize>::into(i)].clone(),
-            _ => panic!("expression is not indexable"),
-        }
-        Expression::Lam(_, _, _) => x,
-        Expression::App(f, arg) => match &*eval(&ctx, f) {
-            Expression::Lam(param, _param_ty, body) => {
-                let arg = eval(&ctx, arg);
-                if !arg.is_val() {
-                    todo!()
-                }
-                if let Expression::Ident(id) = &**param {
-                    match ctx.clone() {
-                        Some(ctx) => eval(&Some(ctx.with(id.to_string(), &arg)), body),
-                        None => eval(&Some(Context::new(None, id.to_string(), &arg)), body),
-                    }
-                } else {
-                    todo!()
-                }
-            },
-            _ => todo!(),
-            // TODO: handle constructor. is it an ident we look up in some scope?
-        },
-        Expression::Fix(x)  if let Expression::Lam(param, _, body) = &*eval(&ctx, x) =>
-        if let Expression::Ident(id) = &**param {
-            match ctx.clone() {
-                Some(ctx) => eval(&Some(ctx.with(id.to_string(), body)), body),
-                None => eval(&Some(Context::new(None, id.to_string(), body)), body),
-            }
-        } else {
-            todo!()
-        },
-        _ => panic!("unexpected expression"),
-    }
-}
+// fn eval(ctx: &Option<Gc<Context>>, x: &Gc<Expression>) -> Gc<Expression> {
+//     let (ctx, x) = (ctx.clone(), x.clone());
+//     match &*x {
+//         Expression::Number(_) => x,
+//         Expression::Bool(_) => x,
+//         Expression::String(_) => x,
+//         Expression::BinOp(left, op, right) => match (&*eval(&ctx, left), op, &*eval(&ctx, right)) {
+//             (Expression::Number(l), BinOp::Add, Expression::Number(r)) => Expression::new_number(l+r),
+//             (Expression::Number(l), BinOp::Sub, Expression::Number(r)) => Expression::new_number(l-r),
+//             (Expression::Number(l), BinOp::Mul, Expression::Number(r)) => Expression::new_number(l*r),
+//             (Expression::Number(l), BinOp::Div, Expression::Number(r)) => Expression::new_number(l/r),
+//             _ => panic!("left and right were not numbers")
+//         },
+//         Expression::Ident(id) if let Some(ctx) = ctx => ctx.lookup(id),
+//         Expression::Let(id, v, x) if let Expression::Ident(id) = &**id => match ctx.clone() {
+//             Some(ctx) => eval(&Some(ctx.with(id.to_string(), v)), x),
+//             None => eval(&Some(Context::new(None, id.to_string(), v)), x),
+//         },
+//         Expression::If(cond, then, els) if let Expression::Bool(cond) = *eval(&ctx, cond) =>
+//             if cond { eval(&ctx, then) } else { eval(&ctx, els) },
+//         Expression::Tuple(elements) => Expression::new_tuple(elements.iter().map(
+//             |elem| (elem.0.clone(), eval(&ctx, &elem.1))
+//         ).collect()),
+//         Expression::List(elements) => Expression::new_list(elements.iter().map(|elem| eval(&ctx, elem)).collect()),
+//         Expression::Selector(x, sel) if let Expression::Ident(id) = &**sel =>
+//         if let Expression::Tuple(r) = &*eval(&ctx, x) {
+//             r.iter().find_map(|ele|
+//                 if let Some(x) = &ele.0 && let Expression::Ident(got)= &**x && id == got {
+//                     Some(ele.1.clone())
+//                 } else {
+//                     None
+//                 }).unwrap()
+//         } else {
+//             panic!("selector expression wasn't made up of tuple and ident")
+//         },
+//         Expression::Index(x, i) if let Expression::Number(i) = &*eval(&ctx, i) => match &*eval(&ctx, x) {
+//             Expression::Tuple(r) => r[Into::<usize>::into(i)].1.clone(),
+//             Expression::List(l) => l[Into::<usize>::into(i)].clone(),
+//             _ => panic!("expression is not indexable"),
+//         }
+//         Expression::Lam(_, _, _) => x,
+//         Expression::App(f, arg) => match &*eval(&ctx, f) {
+//             Expression::Lam(param, _param_ty, body) => {
+//                 let arg = eval(&ctx, arg);
+//                 if !arg.is_val() {
+//                     todo!()
+//                 }
+//                 if let Expression::Ident(id) = &**param {
+//                     match ctx.clone() {
+//                         Some(ctx) => eval(&Some(ctx.with(id.to_string(), &arg)), body),
+//                         None => eval(&Some(Context::new(None, id.to_string(), &arg)), body),
+//                     }
+//                 } else {
+//                     todo!()
+//                 }
+//             },
+//             _ => todo!(),
+//             // TODO: handle constructor. is it an ident we look up in some scope?
+//         },
+//         Expression::Fix(x)  if let Expression::Lam(param, _, body) = &*eval(&ctx, x) =>
+//         if let Expression::Ident(id) = &**param {
+//             match ctx.clone() {
+//                 Some(ctx) => eval(&Some(ctx.with(id.to_string(), body)), body),
+//                 None => eval(&Some(Context::new(None, id.to_string(), body)), body),
+//             }
+//         } else {
+//             todo!()
+//         },
+//         _ => panic!("unexpected expression"),
+//     }
+// }
 
 fn main() {
     // let prog = Expression::new_let(
@@ -741,8 +756,10 @@ fn main() {
     "#);
     let prog = Expression::new_let(
         Expression::new_ident("x"),
-        Expression::new_ctl(Expression::new_lam(Expression::new_ident("arg"), Type::None.into(), Expression::new_lam(Expression::new_ident("k"), Type::None.into(), Expression::new_app(Expression::new_ident("k"), Expression::new_ident("arg")))), 0),
-        Expression::new_binop(Expression::new_app(Expression::new_ident("x"), Expression::new_number(Number::one())), BinOp::Add, Expression::new_number(Number::from_ulong(2)))
+        Expression::new_ctl(Expression::new_slam("arg", Expression::new_slam("k", Expression::new_app(Expression::new_ident("k"), Expression::new_ident("arg")))),FrameIndex::Unset),
+        Expression::new_binop(Expression::new_app(Expression::new_ident("x"), Expression::new_int(1)), BinOp::Add, Expression::new_int(2))
+        // Expression::new_ctl(Expression::new_lam(Expression::new_ident("arg"), Type::None.into(), Expression::new_lam(Expression::new_ident("k"), Type::None.into(), Expression::new_app(Expression::new_ident("k"), Expression::new_ident("arg")))), GcCell::new(0)),
+        // Expression::new_binop(Expression::new_app(Expression::new_ident("x"), Expression::new_number(Number::one())), BinOp::Add, Expression::new_number(Number::from_ulong(2)))
     );
 
     // println!(r#"evaluating
@@ -755,7 +772,7 @@ fn main() {
     //     "x",
     //     Expression::new_slet(
     //         "y",
-    //         Expression::new_ctl(Expression::new_sulam("arg", Expression::new_sulam("k", Expression::new_ident("arg"))), 0),
+    //         Expression::new_ctl(Expression::new_slam("arg", Expression::new_slam("k", Expression::new_ident("arg"))), FrameIndex::Unset),
     //         Expression::new_ident("y"),
     //     ),
     //     Expression::new_app(Expression::new_ident("x"), Expression::new_int(1))
