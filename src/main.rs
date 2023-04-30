@@ -233,6 +233,27 @@ fn add_fresh_name(unique_names: &mut HashSet<String>, x: &str) -> String {
     to_check
 }
 
+fn merge_free_vars(dst: &mut Vec<String>, subterm: &Gc<Expression>, old_bind: &str) {
+    match &**subterm {
+        Expression::Lam(subterm_free_vars, _, _, _) => {
+            // for each variable in subterm that is not old_bind, add it to dst
+            for x in subterm_free_vars.iter() {
+                if x != old_bind && !dst.contains(x) {
+                    dst.push(x.clone());
+                }
+            }
+        },
+        Expression::Let(bind, rhs, body) => {
+            let Expression::Ident(bind) = &**bind else { panic!("expected ident") };
+            merge_free_vars(dst, rhs, bind);
+            merge_free_vars(dst, body, bind);
+            dst.retain(|x| x != bind && x != old_bind);
+        },
+        _ => (),
+    }
+}
+
+// adjust resolve_names logic to do FV(term) = FV(subterm) - {introduced variables}
 fn resolve_names(
     m: &mut Vec<(String, String)>,
     free_vars: &mut Vec<String>,
@@ -253,7 +274,7 @@ fn resolve_names(
             m.push((x.clone(), fresh_name.clone()));
             let body = resolve_names(m, free_vars, unique_names, dist + 1, body);
             m.pop();
-            unique_names.remove(&fresh_name); // TODO: is this necessary? don't we want globally unique names?
+            unique_names.remove(&fresh_name);
             Expression::new_let(Expression::new_ident(&fresh_name), rhs, body)
         }
         Expression::If(cond, then, els) => {
@@ -306,11 +327,12 @@ fn resolve_names(
             let Expression::Ident(x) = &**bind else { panic!("expected identifier in lambda binding") };
             let fresh_name = add_fresh_name(unique_names, x);
             m.push((x.clone(), fresh_name.clone()));
-            let mut free_vars = Vec::new();
-            let body = resolve_names(m, &mut free_vars, unique_names, 0, body);
+            let mut lam_free_vars = Vec::new();
+            let body = resolve_names(m, &mut lam_free_vars, unique_names, 0, body);
             m.pop();
-            unique_names.remove(&fresh_name); // TODO: is this necessary? don't we want globally unique names?
-            Expression::new_lam(free_vars, Expression::new_ident(&fresh_name), ty.clone(), body)
+            unique_names.remove(&fresh_name);
+            merge_free_vars(&mut lam_free_vars, &body, &fresh_name);
+            Expression::new_lam(lam_free_vars, Expression::new_ident(&fresh_name), ty.clone(), body)
         }
         Expression::App(fun, arg) => {
             let fun = resolve_names(m, free_vars, unique_names, dist, fun);
@@ -534,9 +556,7 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                     }
                     to_set = Some(Expression::new_closure(env, bind.clone(), ty.clone(), body.clone()))
                 },
-                Expression::App(fun, arg) => {println!("applying {:?} to {:?}", fun, arg);
-                match rv {   
-                     
+                Expression::App(fun, arg) => match rv {
                     // eval fun
                     None => to_push = Some(Frame::new_rec(fun.clone())),                    
                     Some(rv) =>
@@ -588,7 +608,7 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                             to_set = Some(rv.clone());
                         }
                     },
-                }},
+                },
                 Expression::Fix(x) => match rv {
                     None => to_push = Some(Frame::new_rec(x.clone())),
                     Some(rv) => {
@@ -632,12 +652,10 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                 _ = rv.insert(arg);
             }
         }
-        // TODO: curried ctl
         if let Some(Expression::Ctl(cls, del)) = to_capture.as_deref() {
             let FrameIndex::Set(del) = *del else { panic!("handler out of scope") }; // TODO: make this an effect as well
             let k : Vec<Frame> = stack.drain(del..).collect();
-            let next_exp = Expression::new_app(cls.clone(), Expression::new_del(k)); // do we want cls arg k or cls k arg?
-            // println!("pushing cls arg k");
+            let next_exp = Expression::new_app(cls.clone(), Expression::new_del(k));
             to_push = Some(Frame::new_rec(next_exp));
         }
         if let Some(x) = to_set {
@@ -655,7 +673,6 @@ fn eval(prog: Gc<Expression>) -> Gc<Expression> {
     let mut free_vars = Vec::new();
     let mut unique_names = HashSet::new();
     let prog = resolve_names(&mut m, &mut free_vars, &mut unique_names, 0, &prog);
-    println!("before eval_stack: {:?}", prog);
     eval_with_stack(vec![Frame::Rv(None), Frame::new_rec(prog)])
 }
 
@@ -806,7 +823,6 @@ mod tests {
             Expression::new_binop(Expression::new_app(Expression::new_app(Expression::new_ident("x"), Expression::new_int(1)), Expression::new_int(2)), BinOp::Add, Expression::new_int(3))
         );
         let res = eval(prog);
-        println!("result: {:?}", res);
         match &*res {
             Expression::Number(n) => assert_eq!(n, &Number::from_ulong(6)),
             _ => self::panic!("expected number"),
@@ -957,4 +973,21 @@ fn main() {
     //     )]),
     //     Expression::new_number(0),
     // );
+    let prog = Expression::new_tlam(
+        "w",
+        Type::new_arr(Type::new_none(), Type::new_arr(Type::new_none(), Type::new_arr(Type::new_none(), Type::new_none()))),
+        Expression::new_tlam(
+            "x",
+            Type::new_arr(Type::new_none(), Type::new_arr(Type::new_none(), Type::new_none())),
+            Expression::new_slet(
+                "y", 
+                Expression::new_int(3),
+                Expression::new_tlam(
+                    "z", 
+                    Type::new_arr(Type::new_none(), Type::new_none()),
+                    Expression::new_binop(Expression::new_ident("w"), BinOp::Add, Expression::new_ident("y")))),
+        ),
+    );
+    println!("{:?}", &prog);
+    eval(prog);
 }
