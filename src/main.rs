@@ -51,8 +51,26 @@ enum Expression {
 #[derive(Debug, Trace, Finalize)]
 enum Type {
     None,
+    Arr(Gc<Type>, Gc<Type>),
     // TODO
     // tuples, lists, string, bool, number, abs, variant, id
+}
+
+impl Type {
+    fn arity(&self) -> usize {
+        match self {
+            Type::None => 0,
+            Type::Arr(_, r) => 1 + r.arity(),
+        }
+    }
+
+    fn new_none() -> Gc<Type> {
+        Type::None.into()
+    }
+
+    fn new_arr(l: Gc<Type>, r: Gc<Type>) -> Gc<Type> {
+        Type::Arr(l, r).into()
+    }
 }
 
 impl Expression {
@@ -99,6 +117,9 @@ impl Expression {
     fn new_lam(free_vars: Vec<String>, bind: Gc<Expression>, ty: Gc<Type>, body: Gc<Expression>) -> Gc<Expression> {
         Expression::Lam(free_vars, bind, ty, body).into()
     }
+    fn new_tlam(bind: &str, ty: Gc<Type>, body: Gc<Expression>) -> Gc<Expression> {
+        Expression::new_lam(Vec::new(), Expression::new_ident(bind), ty, body)
+    }
     fn new_slam(bind: &str, body: Gc<Expression>) -> Gc<Expression> {
         Expression::new_lam(Vec::new(), Expression::new_ident(bind), Type::None.into(), body)
     }
@@ -124,7 +145,6 @@ impl Expression {
     fn new_del(del: Vec<Frame>) -> Gc<Expression> {
         Expression::Del(del).into()
     }
-
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -323,6 +343,15 @@ fn dump_frame_index(x: &Gc<Expression>) {
     }
 }
 
+fn arity(x: &Gc<Expression>) -> usize {
+    match &**x {
+        Expression::Closure(_, _, ty, _) => ty.arity(),
+        Expression::Lam(_, _, ty, _) => ty.arity(),
+        Expression::Fix(_) => todo!(),
+        _ => panic!("not a function"),
+    }
+}
+
 fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
     while let Some(frame) = stack.last() {
         let mut to_capture : Option<Gc<Expression>> = None;
@@ -505,7 +534,9 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                     }
                     to_set = Some(Expression::new_closure(env, bind.clone(), ty.clone(), body.clone()))
                 },
-                Expression::App(fun, arg) => match rv {                    
+                Expression::App(fun, arg) => {println!("applying {:?} to {:?}", fun, arg);
+                match rv {   
+                     
                     // eval fun
                     None => to_push = Some(Frame::new_rec(fun.clone())),                    
                     Some(rv) =>
@@ -523,8 +554,11 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                             };
                             match &*v1 {
                                 Expression::Del(_) => to_restore = Some(v1.clone()),
-                                Expression::Ctl(_, _) => {
-                                    to_capture = Some(v1)
+                                Expression::Ctl(cls, fi) => {
+                                    /* if arity of cls's type is 2, then we capture instead of setting a return value */
+                                    locals.borrow_mut().insert("3".to_string(), v1.clone());
+                                    to_push = Some(Frame::new_rec(Expression::new_app(cls.clone(), rv.clone())));
+                                    // to_capture = Some(v1)
                                 },
                                 _ => {
                                     let Expression::Closure(env, bind, _, body) = &*v1 else { panic!("expected closure") };
@@ -539,10 +573,22 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                             }                                 
                         }
                     } else {
+                        let mut locals = locals.borrow_mut();
+                        if let Some(x) = locals.remove("3") && let Expression::Ctl(old_cls, fi) = &*x {
+                            let res = Expression::new_ctl(rv.clone(), fi.clone());
+                            // depending on the arity of rv, we either capture or set a return value
+                            if arity(&rv) == 1 {
+                                to_capture = Some(res);
+                            } else {
+                                to_set = Some(res);
+                            }
+                        } else {
+                        // if let Expression::Ctl(old_cls, fi) = 
                         // return evaluated body
-                        to_set = Some(rv.clone());
+                            to_set = Some(rv.clone());
+                        }
                     },
-                },
+                }},
                 Expression::Fix(x) => match rv {
                     None => to_push = Some(Frame::new_rec(x.clone())),
                     Some(rv) => {
@@ -586,14 +632,11 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                 _ = rv.insert(arg);
             }
         }
+        // TODO: curried ctl
         if let Some(Expression::Ctl(cls, del)) = to_capture.as_deref() {
-            let arg = {
-                let Some(Frame::Rec { expr: _, locals, rv: _ }) = stack.last() else { panic!("expected record")};
-                locals.borrow().get("2").unwrap().clone()
-            };
             let FrameIndex::Set(del) = *del else { panic!("handler out of scope") }; // TODO: make this an effect as well
             let k : Vec<Frame> = stack.drain(del..).collect();
-            let next_exp = Expression::new_app(Expression::new_app(cls.clone(), arg), Expression::new_del(k)); // do we want cls arg k or cls k arg?
+            let next_exp = Expression::new_app(cls.clone(), Expression::new_del(k)); // do we want cls arg k or cls k arg?
             // println!("pushing cls arg k");
             to_push = Some(Frame::new_rec(next_exp));
         }
@@ -612,6 +655,7 @@ fn eval(prog: Gc<Expression>) -> Gc<Expression> {
     let mut free_vars = Vec::new();
     let mut unique_names = HashSet::new();
     let prog = resolve_names(&mut m, &mut free_vars, &mut unique_names, 0, &prog);
+    println!("before eval_stack: {:?}", prog);
     eval_with_stack(vec![Frame::Rv(None), Frame::new_rec(prog)])
 }
 
@@ -742,17 +786,29 @@ mod tests {
     #[test]
     fn test_effect_resume() {
         println!(r#"evaluating
-        let x = ctl(fun arg k -> k(arg))
-        in x(1) + 2
+        let x = ctl(fun arg1 arg2 k -> k(arg1 + arg2))
+        in x 1 2 + 3
         "#);
         let prog = Expression::new_let(
             Expression::new_ident("x"),
-            Expression::new_ctl(Expression::new_slam("arg", Expression::new_slam("k", Expression::new_app(Expression::new_ident("k"), Expression::new_ident("arg")))),FrameIndex::Unset),
-            Expression::new_binop(Expression::new_app(Expression::new_ident("x"), Expression::new_int(1)), BinOp::Add, Expression::new_int(2))
+            Expression::new_ctl(Expression::new_tlam(
+                "arg1", 
+                Type::new_arr(Type::new_none(), Type::new_arr(Type::new_none(), Type::new_arr(Type::new_none(), Type::new_none()))), 
+                Expression::new_tlam(
+                    "arg2", 
+                    Type::new_arr(Type::new_none(), Type::new_arr(Type::new_none(), Type::new_none())),
+                    Expression::new_tlam(
+                        "k",
+                        Type::new_arr(Type::new_none(), Type::new_none()),
+                        Expression::new_app(Expression::new_ident("k"), Expression::new_binop(Expression::new_ident("arg1"), BinOp::Add, Expression::new_ident("arg2"))))
+                    )),
+            FrameIndex::Unset),
+            Expression::new_binop(Expression::new_app(Expression::new_app(Expression::new_ident("x"), Expression::new_int(1)), Expression::new_int(2)), BinOp::Add, Expression::new_int(3))
         );
         let res = eval(prog);
+        println!("result: {:?}", res);
         match &*res {
-            Expression::Number(n) => assert_eq!(n, &Number::from_ulong(3)),
+            Expression::Number(n) => assert_eq!(n, &Number::from_ulong(6)),
             _ => self::panic!("expected number"),
         }
     }
@@ -765,7 +821,7 @@ mod tests {
         "#);
         let prog = Expression::new_let(
             Expression::new_ident("x"),
-            Expression::new_ctl(Expression::new_slam("arg", Expression::new_slam("k", Expression::new_ident("arg"))),FrameIndex::Unset),
+            Expression::new_ctl(Expression::new_tlam("arg", Type::new_arr(Type::new_none(), Type::new_arr(Type::new_none(), Type::new_none())), Expression::new_tlam("k", Type::new_arr(Type::new_none(), Type::new_none()), Expression::new_ident("arg"))),FrameIndex::Unset),
             Expression::new_binop(Expression::new_app(Expression::new_ident("x"), Expression::new_int(1)), BinOp::Add, Expression::new_int(2))
         );
         let res = eval(prog);
