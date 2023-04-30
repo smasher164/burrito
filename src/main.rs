@@ -329,7 +329,11 @@ fn resolve_names(
             Expression::new_list(GcCell::new(v))
         },
         Expression::Selector(_, _) => todo!(),
-        Expression::Index(_, _) => todo!(),
+        Expression::Index(col, ind) => {
+            let col = resolve_names(m, free_vars, unique_names, dist, col);
+            let ind = resolve_names(m, free_vars, unique_names, dist, ind);
+            Expression::new_index(col, ind)
+        },
         Expression::Ident(x) => {
             // look up x in m up to dist
             // if not found, then it's a free variable
@@ -491,7 +495,6 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                     Some(v) => {
                         let locals = locals.borrow();
                         let vc = locals.get("1").unwrap();
-// TODO: I think I need to make it a GcCell
                         let Expression::List(dst) = &**vc else { panic!("expected list") };
                         let mut dst = dst.borrow_mut();
                         dst.push(v.clone());
@@ -505,7 +508,28 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                     },
                 },
                 Expression::Selector(_, _) => todo!(),
-                Expression::Index(_, _) => todo!(),
+                Expression::Index(col, ind) => match rv {
+                    None => to_push = Some(Frame::new_rec(col.clone())), // eval collection
+                    Some(rv) => if !locals.borrow().contains_key("1") {
+                        // eval ind
+                        locals.borrow_mut().insert("1".to_string(), rv.clone());
+                        to_push = Some(Frame::new_rec(ind.clone()));
+                    } else {
+                        // index into collection
+                        let locals = locals.borrow();
+                        let Some(col) = locals.get("1") else { panic!("expected collection") };
+                        let ind : usize = {
+                            let Expression::Number(ind) = &**rv else { panic!("expected number") };
+                            ind.into()
+                        };
+                        let res = match &**col {
+                            Expression::List(l) => l.borrow()[ind].clone(),
+                            Expression::Tuple(t) => todo!(),
+                            _ => panic!("expected collection"),
+                        };
+                        to_set = Some(res);
+                    },
+                },
                 Expression::Lam(free_vars, bind, ty, body) => {
                     // For each free variable, look it up in the environment and create closure object with it.
                     let mut env = Vec::with_capacity(free_vars.len());
@@ -619,6 +643,74 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
 
 fn eval_stack(x: Gc<Expression>) -> Gc<Expression> {
     eval_with_stack(vec![Frame::Rv(None), Frame::new_rec(x)])
+}
+
+fn eval(prog: Gc<Expression>) -> Gc<Expression> {
+    let mut m = Vec::new();
+    let mut free_vars = Vec::new();
+    let mut unique_names = HashSet::new();
+    let prog = resolve_names(&mut m, &mut free_vars, &mut unique_names, 0, &prog);
+    eval_stack(prog)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_list_index() {
+        println!("evaluating list(1+1, 2+2, 3+3)[1]");
+        let prog = Expression::new_index(
+            Expression::new_list(GcCell::new(vec![
+                Expression::new_binop(Expression::new_int(1), BinOp::Add, Expression::new_int(1)),
+                Expression::new_binop(Expression::new_int(2), BinOp::Add, Expression::new_int(2)),
+                Expression::new_binop(Expression::new_int(3), BinOp::Add, Expression::new_int(3)),
+            ])), 
+            Expression::new_int(1),
+        );
+        let res = eval(prog);
+        match &*res {
+            Expression::Number(n) => assert_eq!(n, &Number::from_ulong(4)),
+            _ => self::panic!("expected number"),
+        }
+    }
+
+    #[test]
+    fn test_effect_resume() {
+        println!(r#"evaluating
+        let x = ctl(fun arg k -> k(arg))
+        in x(1) + 2
+        "#);
+        let prog = Expression::new_let(
+            Expression::new_ident("x"),
+            Expression::new_ctl(Expression::new_slam("arg", Expression::new_slam("k", Expression::new_app(Expression::new_ident("k"), Expression::new_ident("arg")))),FrameIndex::Unset),
+            Expression::new_binop(Expression::new_app(Expression::new_ident("x"), Expression::new_int(1)), BinOp::Add, Expression::new_int(2))
+        );
+        let res = eval(prog);
+        match &*res {
+            Expression::Number(n) => assert_eq!(n, &Number::from_ulong(3)),
+            _ => self::panic!("expected number"),
+        }
+    }
+
+    #[test]
+    fn test_effect_abortive() {
+        println!(r#"evaluating
+        let x = ctl(fun arg k -> arg)
+        in x(1) + 2
+        "#);
+        let prog = Expression::new_let(
+            Expression::new_ident("x"),
+            Expression::new_ctl(Expression::new_slam("arg", Expression::new_slam("k", Expression::new_ident("arg"))),FrameIndex::Unset),
+            Expression::new_binop(Expression::new_app(Expression::new_ident("x"), Expression::new_int(1)), BinOp::Add, Expression::new_int(2))
+        );
+        let res = eval(prog);
+        match &*res {
+            Expression::Number(n) => assert_eq!(n, &Number::from_ulong(1)),
+            _ => self::panic!("expected number"),
+        }  
+    }
+
 }
 
 // fn eval(ctx: &Option<Gc<Context>>, x: &Gc<Expression>) -> Gc<Expression> {
