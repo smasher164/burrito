@@ -131,6 +131,16 @@ mod ext {
                 }
             }
         }
+        fn checked_eq(&self, other: &Self) -> Option<bool> {
+            unsafe {
+                let truth = ca_check_equal(self.data, other.data, CALCIUM_CTX.ctx);
+                match truth {
+                    truth_t_T_TRUE => Some(true),
+                    truth_t_T_FALSE => Some(false),
+                    _ => None,
+                }
+            }
+        }
     }
     impl_op_ex!(+ |a: &Number, b: &Number| -> Number {
         let res = Number::new();
@@ -194,14 +204,7 @@ mod ext {
     impl Eq for Number {}
     impl PartialEq for Number {
         fn eq(&self, other: &Self) -> bool {
-            unsafe {
-                let truth = ca_check_equal(self.data, other.data, CALCIUM_CTX.ctx);
-                match truth {
-                    truth_t_T_TRUE => true,
-                    truth_t_T_FALSE => false,
-                    _ => panic!("incomparable"),
-                }
-            }
+            self.checked_eq(other).expect("incomparable")
         }
     }
     impl Display for Number {
