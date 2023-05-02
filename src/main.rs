@@ -153,6 +153,7 @@ enum BinOp {
     Sub,
     Mul,
     Div,
+    CmpEq,
     // Assign,
     // Comparison,
 }
@@ -409,6 +410,7 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                                     (Expression::Number(l), BinOp::Sub, Expression::Number(r)) => Expression::new_number(l-r),
                                     (Expression::Number(l), BinOp::Mul, Expression::Number(r)) => Expression::new_number(l*r),
                                     (Expression::Number(l), BinOp::Div, Expression::Number(r)) => Expression::new_number(l/r),
+                                    (Expression::Number(l), BinOp::CmpEq, Expression::Number(r)) => Expression::new_bool(l==r),
                                     _ => panic!("left and right were not numbers"),
                                 };
                                 to_set = Some(res);
@@ -581,7 +583,7 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                                     // to_capture = Some(v1)
                                 },
                                 _ => {
-                                    let Expression::Closure(env, bind, _, body) = &*v1 else { panic!("expected closure") };
+                                    let Expression::Closure(env, bind, _, body) = &*v1 else { panic!("expected closure, got {:?}", v1) };
                                     let Expression::Ident(bind) = &**bind else { panic!("expected ident") };
                                     let mut fn_locals: HashMap<String, Gc<Expression>> = HashMap::new();
                                     for (id, val) in env {
@@ -609,25 +611,36 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                         }
                     },
                 },
-                Expression::Fix(x) => match rv {
+                /*
+                Fix(t) -> if t.is_val()
+                    then Lam("$v", App(App(t, Fix(t)), "$v"))
+                    else Fix(eval(t))
+                */
+                Expression::Fix(x) => {
+                    match rv {
                     None => to_push = Some(Frame::new_rec(x.clone())),
                     Some(rv) => {
                         if !locals.borrow().contains_key("1") {
                             locals.borrow_mut().insert("1".to_string(), rv.clone());
-                            let Expression::Closure(env, bind, _, body) = &**rv else { panic!("expected closure") };
-                            let Expression::Ident(bind) = &**bind else { panic!("expected ident") };
-                            let mut fn_locals = HashMap::new();
-                            for (id, val) in env {
-                                fn_locals.insert(id.to_string(), val.clone());
-                            }
-                            let arg = Expression::new_fix(rv.clone());
-                            fn_locals.insert(bind.to_string(), arg);
-                            to_push = Some(Frame::new_rec_hm(body.clone(), fn_locals));
+                            // arity of fixed function?
+                            let lam_type = match &**rv {
+                                Expression::Closure(_, _, ty, _) if let Type::Arr(from, _) = &**ty => from.clone(),
+                                Expression::Lam(_, _, ty, _) if let Type::Arr(from, _) = &**ty => from.clone(),
+                                _ => panic!("not a function"),
+                            };
+                            let z_comb = Expression::new_tlam(
+                                "$v",
+                                lam_type,
+                                Expression::new_app(
+                                    Expression::new_app(rv.clone(), Expression::new_fix(rv.clone())),
+                                    Expression::new_ident("$v")),
+                            );
+                            to_push = Some(Frame::new_rec(z_comb));
                         } else {
                             to_set = Some(rv.clone());
                         }
                     },
-                },
+                }},
                 Expression::Case(_, _) => todo!(),
                 // Expression::Ctl(_, _, _, _, _) => todo!(),
                 Expression::Ctl(fun, frame_index) => match rv {
@@ -747,6 +760,17 @@ mod tests {
     }
 
     #[test]
+    fn test_cmp_eq() {
+        println!("evaluating 1==1");
+        let prog = Expression::new_binop(Expression::new_int(1), BinOp::CmpEq, Expression::new_int(1));
+        let res = eval(prog);
+        match &*res {
+            Expression::Bool(b) => assert_eq!(b, &true),
+            _ => self::panic!("expected bool"),
+        }
+    }
+
+    #[test]
     fn test_list_index() {
         println!("evaluating list(1+1, 2+2, 3+3)[1]");
         let prog = Expression::new_index(
@@ -845,6 +869,45 @@ mod tests {
             Expression::Number(n) => assert_eq!(n, &Number::from_ulong(1)),
             _ => self::panic!("expected number"),
         }  
+    }
+
+    #[test]
+    fn test_fix() {
+        println!(r#"evaluating
+        let sum = fix (fun f n -> if n = 0 then 0 else n + f(n-1))
+        in sum(3)
+        "#);
+        let prog = Expression::new_slet(
+            "sum",
+            Expression::new_fix(
+                Expression::new_tlam(
+                    "f",
+                    Type::new_arr(Type::new_none(), Type::new_arr(Type::new_none(), Type::new_none())),
+                    Expression::new_tlam(
+                        "n",
+                        Type::new_arr(Type::new_none(), Type::new_none()),
+                        Expression::new_if(
+                            Expression::new_binop(Expression::new_ident("n"), BinOp::CmpEq, Expression::new_int(0)),
+                            Expression::new_int(0),
+                            Expression::new_binop(
+                                Expression::new_ident("n"),
+                                BinOp::Add,
+                                Expression::new_app(
+                                    Expression::new_ident("f"),
+                                    Expression::new_binop(Expression::new_ident("n"), BinOp::Sub, Expression::new_int(1))
+                                )
+                            )
+                        )
+                    )
+                )
+            ),
+            Expression::new_app(Expression::new_ident("sum"), Expression::new_int(3)),
+        );
+        let res = eval(prog);
+        match &*res {
+            Expression::Number(n) => assert_eq!(n, &Number::from_ulong(6)),
+            _ => self::panic!("expected number"),
+        }
     }
 }
 
