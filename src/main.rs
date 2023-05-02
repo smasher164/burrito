@@ -38,12 +38,9 @@ enum Expression {
         Gc<Expression>, /* The lambda/closure */
         FrameIndex,          /* the index of the starting frame of the delimited continuation */
     ), // an effect handler
-    Del(Vec<Frame>),                               // a delimited continuation
-    Closure(
-        Vec<(String, Gc<Expression>)>,
-        Gc<Expression>, Gc<Type>, Gc<Expression>
-    ),
-    App(Gc<Expression>, Gc<Expression>), // Reuse for constructors?
+    Del(Vec<Frame>), // a delimited continuation
+    Closure(Vec<(String, Gc<Expression>)>, Gc<Expression>, Gc<Type>, Gc<Expression>),
+    App(Gc<Expression>, Gc<Expression>),
     Fix(Gc<Expression>),
     Case(Gc<Expression>, Vec<(String, String, Gc<Expression>)>), // Compile exhaustive patterns to this, since all we need is an eliminator.
 }
@@ -411,6 +408,8 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                                     (Expression::Number(l), BinOp::Mul, Expression::Number(r)) => Expression::new_number(l*r),
                                     (Expression::Number(l), BinOp::Div, Expression::Number(r)) => Expression::new_number(l/r),
                                     (Expression::Number(l), BinOp::CmpEq, Expression::Number(r)) => Expression::new_bool(l==r),
+                                    (Expression::String(l), BinOp::Add, Expression::String(r)) => Expression::new_string(&(l.clone() + r)),
+                                    (Expression::String(l), BinOp::CmpEq, Expression::String(r)) => Expression::new_bool(l==r),
                                     _ => panic!("left and right were not numbers"),
                                 };
                                 to_set = Some(res);
