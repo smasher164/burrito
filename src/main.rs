@@ -20,6 +20,8 @@ macro_rules! simple_empty_finalize_trace {
     }
 }
 
+// TODO: reconsider how this would look as a typed AST
+
 #[derive(Debug, Trace, Finalize, Clone)]
 enum Expression {
     Number(calcium::Number),
@@ -42,7 +44,15 @@ enum Expression {
     Closure(Vec<(String, Gc<Expression>)>, Gc<Expression>, Gc<Type>, Gc<Expression>),
     App(Gc<Expression>, Gc<Expression>),
     Fix(Gc<Expression>),
-    Case(Gc<Expression>, Vec<(String, String, Gc<Expression>)>), // Compile exhaustive patterns to this, since all we need is an eliminator.
+    Tag(String, Gc<Expression>),
+    Case(
+        Gc<Expression>, // tag
+        Vec<( // cases
+            String, // label
+            Gc<Expression>, // binding
+            Gc<Expression>, // body
+        )>,
+    ), // Compile exhaustive patterns to this, since all we need is an eliminator.
 }
 
 #[derive(Debug, Trace, Finalize)]
@@ -141,6 +151,14 @@ impl Expression {
 
     fn new_del(del: Vec<Frame>) -> Gc<Expression> {
         Expression::Del(del).into()
+    }
+
+    fn new_tag(tag: String, x: Gc<Expression>) -> Gc<Expression> {
+        Expression::Tag(tag, x).into()
+    }
+
+    fn new_case(tag: Gc<Expression>, cases: Vec<(String, Gc<Expression>, Gc<Expression>)>) -> Gc<Expression> {
+        Expression::Case(tag, cases).into()
     }
 }
 
@@ -243,9 +261,15 @@ fn merge_free_vars(dst: &mut Vec<String>, subterm: &Gc<Expression>, old_bind: &s
         },
         Expression::Let(bind, rhs, body) => {
             let Expression::Ident(bind) = &**bind else { panic!("expected ident") };
-            merge_free_vars(dst, rhs, bind);
             merge_free_vars(dst, body, bind);
             dst.retain(|x| x != bind && x != old_bind);
+        },
+        Expression::Case(tag, cases) => {
+            for (_, bind, body) in cases {
+                let Expression::Ident(bind) = &**bind else { panic!("expected ident") };
+                merge_free_vars(dst, body, bind);
+                dst.retain(|x| x != bind && x != old_bind);
+            }
         },
         _ => (),
     }
@@ -340,10 +364,26 @@ fn resolve_names(
         Expression::Fix(x) => {
             Expression::new_fix(resolve_names(m, free_vars, unique_names, dist, x))
         }
-        Expression::Case(_, _) => todo!(),
+        Expression::Case(tag, cases) => {
+            let tag = resolve_names(m, free_vars, unique_names, dist, tag);
+            let mut new_cases = Vec::new();
+            for (label, bind, body) in cases {
+                let Expression::Ident(bind) = &**bind else { panic!("expected identifier in case binding") };
+                let fresh_name = add_fresh_name(unique_names, bind);
+                m.push((bind.clone(), fresh_name.clone()));
+                let body = resolve_names(m, free_vars, unique_names, dist + 1, body);
+                m.pop();
+                unique_names.remove(&fresh_name);
+                new_cases.push((label.clone(), Expression::new_ident(&fresh_name), body));
+            }
+            Expression::new_case(tag, new_cases)
+        },
         Expression::Ctl(lam, i) => {
             Expression::new_ctl(resolve_names(m, free_vars, unique_names, dist, lam), i.clone())
-        }
+        },
+        Expression::Tag(tag, x) => {
+            Expression::new_tag(tag.clone(), resolve_names(m, free_vars, unique_names, dist, x))
+        },
         _ => prog.clone(),
     }
 }
@@ -611,9 +651,7 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                     },
                 },
                 /*
-                Fix(t) -> if t.is_val()
-                    then Lam("$v", App(App(t, Fix(t)), "$v"))
-                    else Fix(eval(t))
+                Fix(t) -> let t' = eval(t) in Lam("$v", App(App(t', Fix(t')), "$v"))
                 */
                 Expression::Fix(x) => {
                     match rv {
@@ -640,8 +678,25 @@ fn eval_with_stack(mut stack: Vec<Frame>) -> Gc<Expression> {
                         }
                     },
                 }},
-                Expression::Case(_, _) => todo!(),
-                // Expression::Ctl(_, _, _, _, _) => todo!(),
+                Expression::Tag(tag, x) => match rv {
+                    None => to_push = Some(Frame::new_rec(x.clone())),
+                    Some(rv) => to_set = Some(Expression::new_tag(tag.clone(), rv.clone())),
+                },
+                Expression::Case(tag, cases) => match rv {
+                    None => to_push = Some(Frame::new_rec(tag.clone())),
+                    Some(rv) => {
+                        let mut locals = locals.borrow_mut();
+                        if !locals.contains_key("1") {
+                            locals.insert("1".to_string(), rv.clone());
+                            let Expression::Tag(tag, x) = &**rv else { panic!("expected tag") };
+                            let Some((_, binding, body)) = cases.iter().find(|(label, _, _)| label == tag) else { panic!("no matching case") };
+                            // push a let frame like let binding = x in body
+                            to_push = Some(Frame::new_rec(Expression::new_let(binding.clone(), x.clone(), body.clone())));
+                        } else {
+                            to_set = Some(rv.clone());
+                        }
+                    },
+                },
                 Expression::Ctl(fun, frame_index) => match rv {
                     // Evaluate fun to a closure
                     // Return a Ctl expression with the closure and the frame index
@@ -905,6 +960,40 @@ mod tests {
         let res = eval(prog);
         match &*res {
             Expression::Number(n) => assert_eq!(n, &Number::from_ulong(6)),
+            _ => self::panic!("expected number"),
+        }
+    }
+
+    #[test]
+    fn test_case() {
+        println!(r#"evaluating
+        let x = Foo(1)
+        in case x of
+            Foo(n) -> n + 1
+            Bar(n) -> n + 2
+        "#);
+        let prog = Expression::new_slet(
+            "x",
+            Expression::new_tag("Foo".to_string(), Expression::new_int(1)),
+            Expression::new_case(
+                Expression::new_ident("x"),
+                vec![
+                    (
+                        "Foo".to_string(),
+                        Expression::new_ident("n"),
+                        Expression::new_binop(Expression::new_ident("n"), BinOp::Add, Expression::new_int(1)),
+                    ),
+                    (
+                        "Bar".to_string(),
+                        Expression::new_ident("n"),
+                        Expression::new_binop(Expression::new_ident("n"), BinOp::Add, Expression::new_int(2)),
+                    ),
+                ],
+            ),
+        );
+        let res = eval(prog);
+        match &*res {
+            Expression::Number(n) => assert_eq!(n, &Number::from_ulong(2)),
             _ => self::panic!("expected number"),
         }
     }
