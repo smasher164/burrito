@@ -1,6 +1,8 @@
 Burrito
 ---
 
+Defunct. See https://github.com/smasher164/yoshi for the successor.
+
 A build system and package manager for humans.
 
 - HM + effects.
